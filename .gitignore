@@ -1,0 +1,31 @@
+# Vaults and anything that might hold real data
+*.kdbx
+*.kdbx.bak
+*.keyx
+*.key
+*.tmp
+*.json
+!package.json
+!*.schema.json
+config.ini
+.env
+*.vaultline-tmp
+# ...except the public demo vault (password: demo123, fake data only)
+!demo/sample.kdbx
+
+# Personal notes, never published
+CLAUDE.local.md
+.private-patterns
+
+# Build output
+dist/
+build/
+*.spec
+*.log
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
