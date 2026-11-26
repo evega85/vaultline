@@ -8,9 +8,12 @@ if "%OUT%"=="" set "OUT=dist"
 
 if not exist ".venv\Scripts\python.exe" (
     echo Creating a private Python environment in .venv ...
-    py -3 -m venv .venv 2>nul || python -m venv .venv || goto :nopython
+    rem Prefer the "python" on PATH (what you installed, or what CI set up); fall back to the py launcher.
+    python -m venv .venv 2>nul || py -3 -m venv .venv || goto :nopython
 )
 call ".venv\Scripts\activate.bat"
+rem Free-threaded Python ("3.xt") can't package the encryption libraries yet.
+python -c "import sys; sys.exit(0 if getattr(sys, '_is_gil_enabled', lambda: True)() else 1)" || goto :freethreaded
 python -m pip install --upgrade pip >nul
 pip install -r requirements.txt || goto :fail
 
@@ -28,6 +31,12 @@ echo.
 echo Done: %OUT%\Vaultline.exe and %OUT%\vaultline-cli.exe
 if "%~1"=="" pause
 exit /b 0
+
+:freethreaded
+echo This Python is a free-threaded build, which Vaultline can't be packaged with yet.
+echo Delete the .venv folder and install the regular Python 3.12+ from https://www.python.org
+if "%~1"=="" pause
+exit /b 1
 
 :nopython
 echo Python was not found. Install Python 3.12 or newer from https://www.python.org and try again.

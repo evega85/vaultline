@@ -38,12 +38,28 @@ jobs:
         shell: cmd
         run: build.bat dist
 
+      # Never publish an exe that can't open a vault: run the packaged app against the demo vault.
+      - name: Self-test the packaged exe
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $p = Start-Process dist\Vaultline.exe -ArgumentList '--selftest','demo\sample.kdbx' -PassThru
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "Vaultline.exe self-test hung (an error dialog?)" }
+          if ($p.ExitCode -ne 0) {
+            Get-Content demo\sample.selftest-error.txt -ErrorAction SilentlyContinue
+            throw "Vaultline.exe failed its self-test (exit $($p.ExitCode))"
+          }
+          & dist\vaultline-cli.exe --help | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw "vaultline-cli.exe --help failed" }
+          "Self-test passed"
+
       - name: Checksums
         shell: pwsh
         run: |
-          Get-FileHash dist\*.exe -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content dist\SHA256SUMS.txt
+          $lines = Get-FileHash dist\*.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" }
+          [IO.File]::WriteAllText("$PWD\dist\SHA256SUMS.txt", ($lines -join "`n") + "`n")
 
       - uses: actions/upload-artifact@v4
         with:
