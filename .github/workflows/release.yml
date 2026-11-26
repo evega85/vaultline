@@ -50,8 +50,9 @@ jobs:
             Get-Content demo\sample.selftest-error.txt -ErrorAction SilentlyContinue
             throw "Vaultline.exe failed its self-test (exit $($p.ExitCode))"
           }
-          & dist\vaultline-cli.exe --help | Select-Object -First 3
+          $help = & dist\vaultline-cli.exe --help
           if ($LASTEXITCODE -ne 0) { throw "vaultline-cli.exe --help failed" }
+          $help | Select-Object -First 2
           "Self-test passed"
 
       - name: Checksums
