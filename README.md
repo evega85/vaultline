@@ -1,5 +1,9 @@
 # Vaultline
 
+[![Latest release](https://img.shields.io/github/v/release/evega85/vaultline)](https://github.com/evega85/vaultline/releases/latest)
+[![CI](https://github.com/evega85/vaultline/actions/workflows/ci.yml/badge.svg)](https://github.com/evega85/vaultline/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/evega85/vaultline)](LICENSE)
+
 **A fast, minimal password manager for Windows that opens your existing KeePass (`.kdbx`) file.**
 
 ![Vaultline main window](docs/screenshot.png)
@@ -62,14 +66,31 @@ Right-click a row for more (copy URL, edit, delete).
 - **Locking.** Auto-lock after 10 minutes of inactivity (adjustable). Optional PIN quick-unlock: after one full unlock, locking only asks for a PIN. The master password is required again after 3 wrong PINs or a restart.
 - **Website icons** are downloaded straight from each entry's own website (like KeePassXC), never through a third-party service, and are stored inside your `.kdbx`. You can turn this off in Settings.
 - **Recommendation:** keep your own backup of your `.kdbx` file, and test Vaultline on a copy first.
+- **Found a security problem?** [Report a security issue](SECURITY.md) privately. Please don't open a public issue.
 
 ---
 
 ## Command line (optional)
 
-`vaultline-cli.exe` lets scripts or an AI assistant **organise** your vault (list entries, move them into folders, rename, tag, tidy cards) **without ever seeing a secret.** It can't read or set passwords, card numbers, card codes, expiry dates, notes or OTP secrets.
+`vaultline-cli.exe` lets scripts or an AI assistant **organise** your vault (list entries, move them into folders, rename, tag, tidy cards) **without ever seeing a secret.** It can't read or set passwords, card numbers, card codes, expiry dates, notes or OTP secrets. The one opt-in exception is described below.
 
 It's off by default. Turn it on in **Settings → Allow command-line access**. It only works while Vaultline is running and unlocked, and only from your own Windows account. Run `vaultline-cli --help` for examples.
+
+### Sharing one folder with an agent (optional, off by default)
+
+Sometimes you want an automated helper, such as a script or an AI agent driving a headless browser, to sign in to a website for you. **Settings → Share a folder with agents** lets it ask for the **username, password or one-time code** of entries in **one folder you choose** (subfolders included):
+
+```
+vaultline-cli secret <entry-id> --field password    (or username, otp)
+```
+
+- **You approve every request.** Vaultline pops up the entry, its website and the program asking, with **Deny** (the default), **Allow once** or **Allow this entry for 15 minutes**. With no answer in 60 seconds, the request is denied.
+- **Only that folder.** Entries anywhere else, cards, and fields that are references to other entries are refused. The command line can't move entries or folders *into* the shared folder; only you can, in Vaultline.
+- **Only while fully unlocked**, with command-line access on. Locking (by hand, auto-lock or PIN lock) cancels every 15-minute allowance and any open request.
+- **Logged.** Each request is written to `%LOCALAPPDATA%\Vaultline\agent-access.log`: time, entry, field, the program that asked, and allowed or denied. The value itself is never logged.
+- The value is printed bare on standard output so a helper script can pass it straight into a browser field. **The agent should never print, echo or save it.**
+
+**What this does and doesn't protect against.** It limits which entries can be asked for, makes you approve each one, and keeps a record. It is **not** a defence against a harmful program already running under your Windows account: such a program could read the value as it passes, change Vaultline's settings file (the change shows at the next unlock), or simply watch your screen and keyboard. Only share a folder that holds the logins the agent needs. Check what's in it when you turn sharing on, and turn sharing off when you're done.
 
 ---
 
@@ -94,7 +115,7 @@ python -m venv .venv
 
 **Releases:** pushing a version tag (for example `git tag v1.0.0 && git push origin v1.0.0`) makes GitHub Actions run the tests, build both `.exe` files and attach them to a GitHub Release with SHA-256 checksums.
 
-**Contributing:** issues and pull requests are welcome. Please read [CLAUDE.md](CLAUDE.md) for the design rules (safe saving, keeping the file compatible with other KeePass apps, and the CLI never handling secrets). Use made-up data only in tests and screenshots; never commit a real vault.
+**Contributing:** issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), and read [CLAUDE.md](CLAUDE.md) for the design rules (safe saving, keeping the file compatible with other KeePass apps, and the CLI never handling secrets outside the opt-in agent folder). Use made-up data only in tests and screenshots; never commit a real vault.
 
 **Platform:** Vaultline is developed and tested on Windows 10/11. macOS and Linux may work from source but aren't tested, and the command line is Windows-only for now.
 

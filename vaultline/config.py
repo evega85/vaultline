@@ -36,6 +36,9 @@ class Config:
     pin_salt: str = ""
     pin_hash: str = ""                # scrypt hash; the PIN itself is never stored
     cli_enabled: bool = False         # allow vaultline-cli to talk to the unlocked app
+    agent_share_enabled: bool = False # let agents ask (with approval) for secrets in one folder
+    agent_folder_uuid: str = ""       # that folder's UUID (hex), so renames don't break it
+    window_geometry: str = ""         # main window position and size (Qt saveGeometry, base64)
 
     @classmethod
     def load(cls) -> "Config":

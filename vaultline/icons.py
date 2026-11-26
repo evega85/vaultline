@@ -28,6 +28,7 @@ GLOBE = "\uE774"
 DELETE = "\uE74D"
 SETTINGS = "\uE713"
 CARD = "\uE8C7"
+BACK = "\uE72B"
 
 
 def glyph_font(px: int) -> QFont:

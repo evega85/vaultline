@@ -2,8 +2,9 @@
 
 Talks to the running app over a named pipe only your Windows account can open.
 Turn it on in Vaultline > Settings > "Allow command-line access".
-Never prints secrets: no passwords, card numbers or codes, notes, OTP secrets
-or custom field values.
+Never prints secrets (passwords, card numbers or codes, notes, OTP secrets,
+custom field values), except `secret` below, which is off unless you share a
+folder with agents in Settings, and asks you in Vaultline every time.
 
 Examples
   vaultline-cli status
@@ -24,6 +25,11 @@ Examples
   vaultline-cli cards fix               (hide card numbers/codes, move imported
                                          Password_xxxxx fields into Password, etc.)
   vaultline-cli update 3f2a9c --brand Visa --cardholder "A Person"
+  vaultline-cli secret 3f2a9c --field password
+                                        (only for entries in the folder shared with
+                                         agents; Vaultline asks you to allow it. Prints
+                                         the bare value for a helper script to pipe into
+                                         a browser field: never print or log it)
 
 batch file: a JSON list of ops, e.g.
   [{"op": "move", "ids": ["3f2a9c"], "to": "Work"},
@@ -176,6 +182,9 @@ def main(argv: list[str] | None = None) -> int:
     cf = csub.add_parser("fix", help="bring cards to the standard layout (values stay inside Vaultline)")
     cf.add_argument("ids", nargs="*", help="only these cards (default: all)")
     cf.add_argument("--dry-run", action="store_true", help="show what would change, change nothing")
+    sp = sub.add_parser("secret", help="one value from the folder shared with agents (asks you in Vaultline)")
+    sp.add_argument("id")
+    sp.add_argument("--field", choices=("password", "username", "otp"), default="password")
     sp = sub.add_parser("batch")
     sp.add_argument("file", help='JSON file with a list of ops, or "-" for stdin')
 
@@ -207,6 +216,11 @@ def main(argv: list[str] | None = None) -> int:
                 args["name"] = a.name
             if a.fcmd == "move":
                 args["to"] = a.to
+        elif a.cmd == "secret":
+            result = call("secret", {"id": a.id, "field": a.field})
+            sys.stdout.write(result["value"])  # bare, no newline: for a script to pipe on, never to display
+            sys.stdout.flush()
+            return 0
         elif a.cmd == "batch":
             text = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()
             cmd, args = "batch", {"ops": json.loads(text)}

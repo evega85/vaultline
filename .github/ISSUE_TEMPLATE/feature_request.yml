@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest an idea or an improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to do?
+      description: Describe what you're trying to get done, not only the feature. That helps find the best way to do it.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How you picture it working
+  - type: textarea
+    id: other
+    attributes:
+      label: How other apps handle it
+      description: For example KeePassXC or KeePassium, if they do. Optional.

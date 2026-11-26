@@ -545,3 +545,40 @@ def test_lock_clears_everything(setup):
     assert win.vault_view._views == []
     assert QGuiApplication.clipboard().text() == ""
     assert "inactivity" in win.unlock_view.error.text()
+
+
+def test_settings_is_a_page(setup):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    win.vault_view.settings_btn.click()
+    page = win.settings_page
+    assert page is not None and win.stack.currentWidget() is page
+    shot(win, "settings-page")
+    page.clip.setValue(42)
+    QTest.keyClick(page, Qt.Key_Escape)  # Esc saves and goes back to the list
+    assert win.settings_page is None and win.stack.currentWidget() is win.vault_view
+    assert win.config.clipboard_clear_seconds == 42 and clip.clear_seconds == 42
+
+    win.vault_view.settings_btn.click()
+    win.settings_page.clip.setValue(15)
+    vc.lock(full=True)  # locking while the page is open saves it and shows the lock screen
+    assert wait_for(app, lambda: win.stack.currentWidget() is win.unlock_view)
+    assert win.settings_page is None and win.config.clipboard_clear_seconds == 15
+
+
+def test_window_reopens_where_it_was(setup):
+    app, win, vc, clip, db = setup
+    area = app.primaryScreen().availableGeometry()
+    win.setGeometry(area.x() + 40, area.y() + 30, 600, 450)
+    app.processEvents()
+    before = win.geometry()
+    win.hide_to_tray()  # also what happens before Quit from the tray
+    saved = cfgmod.Config.load()
+    assert saved.window_geometry
+    win2 = MainWindow(saved, VaultController(saved, app), clip)
+    try:
+        assert win2.geometry() == before
+    finally:
+        win2.allow_close = True
+        win2.vc.shutdown()
+        win2.close()

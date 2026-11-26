@@ -6,6 +6,9 @@ is unlocked. It can read structure (titles, usernames, URLs, folders, field
 names) and reorganise (move, rename, tag, delete to recycle bin, folders).
 It never returns secrets: no passwords, card numbers or codes, notes, OTP
 secrets or custom field values.
+
+The one exception is `secret` (see agent_access.py): off by default, limited to one folder the
+user shares in Settings, and every request needs the user's approval in the app.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from shiboken6 import isValid
 
 from . import pipe_name
+from .agent_access import AccessRefused, AgentGate, client_process, shared_folder_path, shared_ids_for
 from .controller import VaultController
 from .vault import (CreateFolder, DeleteEntries, DeleteFolder, EntryView, MoveEntries, MoveFolder, NormalizeCards,
                     RenameFolder, Snapshot, UpdateEntry, card_fixes)
@@ -32,6 +36,8 @@ class CliError(Exception):
 def entry_meta(v: EntryView) -> dict:
     """Everything the CLI may know about an entry. Never put secret values in here."""
     username = v.username
+    if "username" in v.references:
+        username = "(reference)"  # it could point at another entry's password
     if v.is_card and username and username == v.card_number:
         username = f"•••• {v.card_last4}" if v.card_last4 else "••••"
     meta = {
@@ -71,9 +77,10 @@ def entry_meta(v: EntryView) -> dict:
 class CliServer(QObject):
     changed_by_cli = Signal(str)  # human summary, for a toast
 
-    def __init__(self, controller: VaultController, parent: QObject | None = None):
+    def __init__(self, controller: VaultController, parent: QObject | None = None, gate: AgentGate | None = None):
         super().__init__(parent)
         self.vc = controller
+        self.gate = gate  # None: `secret` is always refused
         self._ids = count(1)
         self._waiting: dict[int, tuple[QLocalSocket, str]] = {}
         self._buffers: dict[QLocalSocket, bytes] = {}
@@ -94,6 +101,8 @@ class CliServer(QObject):
 
     def _drop(self, sock: QLocalSocket) -> None:
         self._buffers.pop(sock, None)
+        if self.gate is not None:
+            self.gate.cancel(sock)
         if isValid(sock):
             sock.deleteLater()
 
@@ -143,8 +152,11 @@ class CliServer(QObject):
             if self.vc.is_unlocked and self.vc.config.cli_enabled and self.vc.snapshot:
                 s = self.vc.snapshot
                 out.update(database=self.vc.path, entries=len(s.entries), folders=len(s.groups))
+                out["agent_folder"] = shared_folder_path(self.vc.config, s)
             return out
         snap = self._snap()
+        if cmd == "secret":
+            return self._secret(snap, args, sock)
         if cmd == "folders":
             counts: dict[str, int] = {}
             for v in snap.entries:
@@ -196,17 +208,59 @@ class CliServer(QObject):
             return self._apply(sock, changes, summary)
         raise CliError(f"Unknown command: {cmd}")
 
+    def _secret(self, snap: Snapshot, args: dict, sock: QLocalSocket):
+        if self.gate is None:
+            raise CliError("Sharing with agents isn't available.")
+        field_name = str(args.get("field") or "password")
+        entry = self._entry(snap, args["id"])
+        try:
+            self.gate.request(entry, field_name, client_process(sock), lambda resp: self._reply(sock, resp), key=sock)
+        except AccessRefused as exc:
+            raise CliError(str(exc)) from None
+        return None  # reply comes from the gate (now, or after the prompt)
+
+    def _guard_shared(self, snap: Snapshot, moving_from: list[str], dest_uuid: str | None, dest_path: str = ""):
+        """Refuse to bring entries or folders INTO the agents' folder from outside it: otherwise the
+        CLI could move any entry there and then ask for its password. Moves within it are fine."""
+        shared = shared_ids_for(self.vc.config, snap)
+        if not shared:
+            return
+        if dest_uuid is None and dest_path:  # path that may not exist yet: check its existing parents
+            parts = tuple(p.strip() for p in dest_path.replace("\\", "/").split("/") if p.strip())
+            for n in range(len(parts), 0, -1):
+                hit = [g for g in snap.groups if g.path == parts[:n]]
+                if hit:
+                    dest_uuid = hit[0].uuid if len(hit) == 1 else None
+                    if len(hit) > 1 and any(g.uuid in shared for g in hit):
+                        dest_uuid = next(g.uuid for g in hit if g.uuid in shared)
+                    break
+        if dest_uuid in shared and any(src not in shared for src in moving_from):
+            raise CliError("Can't move things into the folder shared with agents from the command line. "
+                           "Do it in Vaultline.")
+
+    @staticmethod
+    def _no_refs(op: dict, keys: tuple[str, ...]) -> None:
+        for k in keys:
+            vals = op.get(k)
+            for v in (vals if isinstance(vals, list) else [vals]):
+                if isinstance(v, str) and "{REF:" in v.upper():
+                    raise CliError("Field references ({REF:...}) can't be set from the command line")
+
     def _change(self, snap: Snapshot, op: dict) -> tuple[list, str]:
         kind = op.get("op")
         if kind == "move":
-            ids = [self._entry(snap, i).uuid for i in self._list(op, "ids")]
+            views = [self._entry(snap, i) for i in self._list(op, "ids")]
+            ids = [v.uuid for v in views]
             target = str(op.get("to", "")).strip()
             if target in ("", "/"):
                 return [MoveEntries(ids, group_uuid=snap.root_uuid)], f"moved {len(ids)} to top level"
             fid = self._folder_id(snap, target, must_exist=False)
+            self._guard_shared(snap, [v.group_uuid for v in views], fid, target)
             ch = MoveEntries(ids, group_uuid=fid) if fid else MoveEntries(ids, new_group=target)
             return [ch], f"moved {len(ids)} to {target}"
         if kind == "update":
+            self._no_refs(op, ("title", "username", "url", "add_tags", "brand", "cardholder", "phone",
+                               "local_phone"))
             v = self._entry(snap, op["id"])
             ch = UpdateEntry(v.uuid, title=op.get("title"), username=op.get("username"), url=op.get("url"),
                              tags_add=list(op.get("add_tags") or []), tags_remove=list(op.get("remove_tags") or []),
@@ -230,6 +284,7 @@ class CliServer(QObject):
             fid = self._folder_id(snap, op["folder"])
             to = str(op.get("to", "")).strip()
             parent = None if to in ("", "/") else self._folder_id(snap, to)
+            self._guard_shared(snap, [fid], parent)
             return [MoveFolder(fid, parent)], "moved a folder"
         if kind == "folder-delete":
             fid = self._folder_id(snap, op["folder"])

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/evega85/vaultline/security/advisories/new
+    about: Please report security problems privately. See SECURITY.md. Don't open a public issue.

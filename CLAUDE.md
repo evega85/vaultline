@@ -11,7 +11,8 @@ Design rules to keep:
 - Favicons are fetched directly from each site, never through a third-party icon service. Local or private hosts are skipped.
 - Custom fields: anything `is_internal_field` reports (standard, OTP, KeePassXC-Browser, KeePassXC passkeys) is never shown or edited, only preserved.
 - PIN unlock is Vaultline's own (not Windows Hello). A PIN lock drops the parsed database but keeps the credentials in memory; 3 wrong tries or a restart means a full lock.
-- The CLI never reads or sets secret values (passwords, card numbers/codes/expiry, notes, OTP secrets, custom field values). `cli_server.entry_meta` is the only place entries are serialised for it. Card fixes run inside the app and report without values.
+- The CLI never reads or sets secret values (passwords, card numbers/codes/expiry, notes, OTP secrets, custom field values). `cli_server.entry_meta` is the only place entries are serialised for it. Card fixes run inside the app and report without values. It also refuses `{REF:...}` in anything it writes, because references are resolved when read.
+- The one exception is `secret` (agent_access.py): off by default, only for entries in the one folder the user shares (by UUID, subfolders included; no cards or reference fields), only while fully unlocked, and every request is approved in a prompt where Deny is the default. Any lock clears allowances. The access log never holds values. The CLI can't move entries or folders into the shared folder.
 - Cards use the field names KeePassXC creates when importing from Bitwarden: `card_number` and `card_code` (protected), `card_expMonth`, `card_expYear`, `card_cardholderName`, `card_brand`, plus `Phone` and `Phone (local)`. The website is the normal URL field. Older layouts are still read.
 - Tests use private pipe names (`VAULTLINE_INSTANCE`, set in tests/conftest.py) so they can never talk to a running Vaultline.
 - Tests and the demo vault use made-up data only.

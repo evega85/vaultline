@@ -1,6 +1,6 @@
 """Copy the current committed code into a separate public repo folder, after a privacy check.
 
-    python tools/make_public_snapshot.py [--target ../vaultline-public] [--message "v1.0.0"] [--check-only]
+    python tools/make_public_snapshot.py [--target ../public] [--message "v1.0.0"] [--check-only]
 
 What it does:
   1. Takes the files tracked by git at HEAD (not untracked or ignored files), minus EXCLUDE.
@@ -80,7 +80,7 @@ def scan(files: list[str], pats: list[re.Pattern], extra_text: str = "") -> list
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", default=str(ROOT.parent / "vaultline-public"))
+    ap.add_argument("--target", default=str(ROOT.parent / "public"))
     ap.add_argument("--message", default="Public snapshot")
     ap.add_argument("--check-only", action="store_true", help="scan only, copy nothing")
     a = ap.parse_args()

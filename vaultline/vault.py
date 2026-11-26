@@ -171,6 +171,7 @@ class EntryView:
     modified: datetime | None = None
     totp: pyotp.TOTP | None = field(default=None, repr=False)
     password_alias: str = ""  # custom field standing in for an empty Password (Bitwarden import)
+    references: tuple[str, ...] = ()  # "username"/"password" when stored as a {REF:...} to another entry
 
     def get_field(self, key: str) -> str:
         return next((f.value for f in self.custom if f.key == key), "")
@@ -280,6 +281,7 @@ class GroupView:
     name: str
     path: tuple[str, ...]
     depth: int
+    parent_uuid: str = ""  # the root's uuid for top-level folders
 
     @property
     def display(self) -> str:
@@ -514,7 +516,9 @@ class Vault:
                 continue
             path, in_bin = path_of(g)
             if not in_bin:
-                groups.append(GroupView(g.uuid.hex, g.name or "", path, len(path) - 1))
+                parent = g.parentgroup
+                groups.append(GroupView(g.uuid.hex, g.name or "", path, len(path) - 1,
+                                        parent.uuid.hex if parent is not None else ""))
         groups.sort(key=lambda gv: tuple(p.casefold() for p in gv.path))
 
         views = []
@@ -540,7 +544,10 @@ class Vault:
             aliases = [f for f in custom if _PASSWORD_ALIAS.match(f.key) and f.value]
             if len(aliases) == 1:
                 alias, password = aliases[0].key, aliases[0].value
+        refs = tuple(name for name, key in (("username", "UserName"), ("password", "Password"))
+                     if "{REF:" in fields.get(key, "").upper())
         return EntryView(
+            references=refs,
             password_alias=alias,
             uuid=e.uuid.hex,
             title=fields.get("Title", ""),

@@ -1,15 +1,17 @@
-"""Settings: security, PIN, auto-lock, clipboard, icons, command line."""
+"""Settings page (inside the main window): security, PIN, auto-lock, clipboard, icons, command line.
+
+Changes are saved when you leave the page (back arrow, Esc) or when Vaultline locks."""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSpinBox,
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QKeyEvent
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
                                QVBoxLayout, QWidget)
 
-from .. import theme
+from .. import icons, theme
 from ..config import BACKUP_DIR, Config
 
 
@@ -53,24 +55,57 @@ def cli_command() -> str:
     return f'"{Path(sys.executable)}" -m vaultline.cli  (from {root})'
 
 
-class SettingsDialog(QDialog):
+class SettingsPage(QWidget):
     change_master = Signal()
     pin_toggled = Signal(bool)       # MainWindow asks for the PIN and may refuse
     change_pin = Signal()
     download_icons = Signal(bool)    # True = missing only
+    done = Signal()                  # back arrow / Esc: MainWindow saves and returns to the list
 
-    def __init__(self, parent: QWidget, config: Config, db_path: str):
-        super().__init__(parent)
+    def __init__(self, config: Config, db_path: str, groups=()):
+        super().__init__()
         self.config = config
-        self.setWindowTitle("Settings")
-        self.setModal(True)
-        self.setFixedWidth(500)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 20, 22, 18)
-        root.setSpacing(12)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # header: back arrow + title (stays put while the page scrolls)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(12, 10, 16, 6)
+        bar.setSpacing(6)
+        self.back = QPushButton()
+        self.back.setObjectName("Ghost")
+        self.back.setIcon(icons.glyph(icons.BACK, theme.TEXT_2, 16))
+        self.back.setIconSize(QSize(16, 16))
+        self.back.setFixedSize(42, 42)
+        self.back.setToolTip("Back (Esc)")
+        self.back.setCursor(Qt.PointingHandCursor)
+        self.back.clicked.connect(self.done)
+        bar.addWidget(self.back)
         head = QLabel("Settings")
         head.setObjectName("DialogTitle")
-        root.addWidget(head)
+        bar.addWidget(head)
+        bar.addStretch()
+        outer.addLayout(bar)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        outer.addWidget(scroll, 1)
+        body = QWidget()
+        scroll.setWidget(body)
+        centre = QHBoxLayout(body)
+        centre.setContentsMargins(16, 4, 16, 20)
+        column = QWidget()
+        column.setMaximumWidth(620)
+        centre.addStretch()
+        centre.addWidget(column, 100)
+        centre.addStretch()
+        root = QVBoxLayout(column)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
 
         # security
         box, lay = _section("SECURITY")
@@ -129,6 +164,30 @@ class SettingsDialog(QDialog):
                             "delete to the recycle bin). It can see titles, usernames, URLs and folders, but "
                             "never passwords, card numbers or codes, notes, or OTP secrets. "
                             "Only your Windows account can connect."))
+        self.share = QCheckBox("Share a folder with agents")
+        self.share.setChecked(config.agent_share_enabled and bool(config.agent_folder_uuid))
+        self.folder = QComboBox()
+        self.folder.addItem("Choose a folder…", "")
+        for g in groups:
+            self.folder.addItem("    " * g.depth + g.name, g.uuid)
+        if config.agent_folder_uuid:
+            i = self.folder.findData(config.agent_folder_uuid)
+            if i < 0:
+                self.folder.addItem("(folder not in this database)", config.agent_folder_uuid)
+                i = self.folder.count() - 1
+            self.folder.setCurrentIndex(i)
+        self.folder.setMinimumWidth(200)
+        lay.addLayout(_row(self.share, self.folder))
+        self.share_hint = _hint("With this on, vaultline-cli secret can ask for the username, password or "
+                                "one-time code of an entry in this folder or its subfolders, for example so an "
+                                "agent can sign in to a website. Vaultline asks you every time (or allows one "
+                                "entry for 15 minutes) and logs each request, never the value. Locking cancels "
+                                "every allowance. This limits and records access; it doesn't protect against "
+                                "a harmful program already running on this PC.")
+        lay.addWidget(self.share_hint)
+        self.cli.toggled.connect(self._sync_share)
+        self.share.toggled.connect(self._sync_share)
+        self._sync_share()
         cmd = QLabel(cli_command())
         cmd.setTextInteractionFlags(Qt.TextSelectableByMouse)
         cmd.setWordWrap(True)
@@ -149,11 +208,11 @@ class SettingsDialog(QDialog):
         lay.addLayout(_row(backups))
         root.addWidget(box)
 
-        done = QPushButton("Done")
-        done.setObjectName("Primary")
-        done.setDefault(True)
-        done.clicked.connect(self.accept)
-        root.addLayout(_row(QWidget(), done, stretch_after=0))
+        root.addStretch()
+
+    def _sync_share(self, *_):
+        self.share.setEnabled(self.cli.isChecked())
+        self.folder.setEnabled(self.cli.isChecked() and self.share.isChecked())
 
     def set_pin_checked(self, on: bool) -> None:
         self.pin.blockSignals(True)
@@ -165,13 +224,21 @@ class SettingsDialog(QDialog):
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(BACKUP_DIR)))
 
-    def accept(self) -> None:
+    def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
+        if e.key() == Qt.Key_Escape:
+            self.done.emit()
+        else:
+            super().keyPressEvent(e)
+
+    def save(self) -> None:
         c = self.config
         c.auto_lock_enabled = self.auto.isChecked()
         c.auto_lock_minutes = self.minutes.value()
         c.clipboard_clear_seconds = self.clip.value()
         c.auto_download_icons = self.icons_auto.isChecked()
         c.cli_enabled = self.cli.isChecked()
+        folder = self.folder.currentData() or ""
+        c.agent_share_enabled = bool(self.share.isChecked() and folder)
+        c.agent_folder_uuid = folder if c.agent_share_enabled else ""
         c.save()
-        super().accept()
 

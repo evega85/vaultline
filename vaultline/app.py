@@ -10,10 +10,12 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from . import APP_NAME, icons, pipe_name, theme
+from .agent_access import AgentGate
 from .cli_server import CliServer
 from .clipboard import SecureClipboard
 from .config import Config
 from .controller import VaultController
+from .ui.agent_prompt import show_prompt
 from .ui.main_window import MainWindow, enable_dark_title_bar
 
 _INPUT_EVENTS = {QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.Wheel}
@@ -109,6 +111,8 @@ class Tray(QObject):
                                   QSystemTrayIcon.Information, 2500)
 
     def quit(self) -> None:
+        if self.win.isVisible():
+            self.win.remember_geometry()  # hidden: already saved when it went to the tray
         self.win.clipboard.wipe()
         self.vc.shutdown()
         self.icon.hide()
@@ -174,7 +178,9 @@ def main() -> int:
     holder["win"] = window
     enable_dark_title_bar(window)
     IdleLock(app, controller, config)
-    cli = CliServer(controller, app)
+    gate = AgentGate(controller, config, ask=lambda req, decide: show_prompt(req, decide, near=window), parent=app)
+    window.settings_saved.connect(gate.reset)
+    cli = CliServer(controller, app, gate=gate)
     cli.changed_by_cli.connect(lambda summary: window.toast.show_message("Command line", summary, "info", 3000))
     tray = Tray(window, controller, config) if QSystemTrayIcon.isSystemTrayAvailable() else None
     if tray is None:

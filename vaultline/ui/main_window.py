@@ -4,11 +4,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QByteArray, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QDialog, QMainWindow, QStackedWidget, QWidget
 
-from .. import APP_NAME, icons, otp as otplib, pin as pinlib, theme
+from .. import APP_NAME, agent_access, icons, otp as otplib, pin as pinlib, theme
 from ..clipboard import SecureClipboard
 from ..config import Config
 from ..controller import VaultController
@@ -16,7 +16,7 @@ from ..vault import CreateFolder, DeleteEntries, DeleteFolder, EntryEdit, EntryV
 from . import small_dialogs
 from .entry_dialog import EntryDialog
 from .pin_view import PinView
-from .settings_dialog import SettingsDialog
+from .settings_page import SettingsPage
 from .toast import Toast
 from .unlock_view import UnlockView
 from .vault_view import VaultView
@@ -27,6 +27,7 @@ _LABELS = {"username": "Username", "password": "Password", "otp": "OTP", "url": 
 
 class MainWindow(QMainWindow):
     hidden_to_tray = Signal()
+    settings_saved = Signal()
 
     def __init__(self, config: Config, controller: VaultController, clipboard: SecureClipboard):
         super().__init__()
@@ -35,6 +36,7 @@ class MainWindow(QMainWindow):
         self.clipboard = clipboard
         self.allow_close = False
         self._dialog: QDialog | None = None
+        self.settings_page: SettingsPage | None = None
         self._icons_running = False
         self._icons_asked = False  # True when the user asked for icons (vs. the automatic fetch on save)
 
@@ -42,6 +44,8 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(icons.app_icon())
         self.resize(720, 600)
         self.setMinimumSize(560, 420)
+        if config.window_geometry:  # reopen where it was; Qt moves it back if that screen is gone
+            self.restoreGeometry(QByteArray.fromBase64(config.window_geometry.encode("ascii")))
 
         root = QWidget()
         root.setObjectName("Root")
@@ -94,7 +98,9 @@ class MainWindow(QMainWindow):
         self.focus_input()
 
     def focus_input(self) -> None:
-        if self.vc.is_unlocked:
+        if self.settings_page is not None:
+            self.settings_page.setFocus()
+        elif self.vc.is_unlocked:
             self.vault_view.focus_search()
         elif self.vc.is_pin_locked:
             self.pin_view.focus()
@@ -108,12 +114,21 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         self.focus_input()
 
+    def remember_geometry(self) -> None:
+        """Store the window's position and size so the next start opens it in the same place."""
+        g = bytes(self.saveGeometry().toBase64()).decode("ascii")
+        if g != self.config.window_geometry:
+            self.config.window_geometry = g
+            self.config.save()
+
     def hide_to_tray(self) -> None:
+        self.remember_geometry()
         self.hide()
         self.hidden_to_tray.emit()
 
     def closeEvent(self, e: QCloseEvent) -> None:  # noqa: N802
         if self.allow_close:
+            self.remember_geometry()
             e.accept()
         else:
             e.ignore()
@@ -135,6 +150,9 @@ class MainWindow(QMainWindow):
         self.vault_view.set_snapshot(snap)
         self.stack.setCurrentWidget(self.vault_view)
         self.vault_view.focus_search()
+        shared = agent_access.shared_folder_path(self.config, snap) if self.config.cli_enabled else None
+        if shared:  # a reminder, so a setting changed behind your back is noticed
+            self.toast.show_message("Shared with agents", f"{shared} (each request asks you)", "info", 4000)
 
     def _on_unlock_failed(self, message: str) -> None:
         self.unlock_view.set_busy(False)
@@ -148,6 +166,7 @@ class MainWindow(QMainWindow):
 
     def _on_locked(self, reason: str) -> None:
         self._close_dialog()
+        self.close_settings()
         self.clipboard.wipe()
         self.vault_view.clear()
         self.unlock_view.reset(reason)
@@ -155,6 +174,7 @@ class MainWindow(QMainWindow):
 
     def _on_pin_locked(self, reason: str) -> None:
         self._close_dialog()
+        self.close_settings()
         self.clipboard.wipe()
         self.vault_view.clear(remember=True)
         self.pin_view.reset(Path(self.vc.path).name, reason)
@@ -271,19 +291,38 @@ class MainWindow(QMainWindow):
 
     # ---- settings ------------------------------------------------------------------
     def open_settings(self) -> None:
-        if not self.vc.is_unlocked or self._dialog is not None:
+        if not self.vc.is_unlocked or self._dialog is not None or self.settings_page is not None:
             return
-        dlg = SettingsDialog(self, self.config, self.vc.path)
-        dlg.change_master.connect(lambda: self._change_master(dlg))
-        dlg.pin_toggled.connect(lambda on: self._pin_toggled(dlg, on))
-        dlg.change_pin.connect(lambda: self._set_pin(dlg))
-        dlg.download_icons.connect(lambda missing: (dlg.accept(), self._download_icons(missing)))
-        self._run_dialog(dlg)
-        self.clipboard.clear_seconds = self.config.clipboard_clear_seconds
+        snap = self.vc.snapshot
+        page = SettingsPage(self.config, self.vc.path, snap.groups if snap else ())
+        page.change_master.connect(self._change_master)
+        page.pin_toggled.connect(self._pin_toggled)
+        page.change_pin.connect(self._set_pin)
+        page.download_icons.connect(lambda missing: (self.close_settings(), self._download_icons(missing)))
+        page.done.connect(self.close_settings)
+        self.settings_page = page
+        self.vault_view.panel.close_panel()
+        self.stack.addWidget(page)
+        self.stack.setCurrentWidget(page)
+        page.setFocus()
 
-    def _change_master(self, parent: QDialog) -> None:
+    def close_settings(self) -> None:
+        """Save the settings page and go back to the list (or wherever a lock sends us)."""
+        page, self.settings_page = self.settings_page, None
+        if page is None:
+            return
+        page.save()
+        self.clipboard.clear_seconds = self.config.clipboard_clear_seconds
+        self.settings_saved.emit()
+        if self.vc.is_unlocked:
+            self.stack.setCurrentWidget(self.vault_view)
+            self.vault_view.focus_search()
+        self.stack.removeWidget(page)
+        page.deleteLater()
+
+    def _change_master(self) -> None:
         vault = self.vc._vault
-        got = small_dialogs.ask_master_change(parent, lambda pw: bool(vault) and vault.check_password(pw))
+        got = small_dialogs.ask_master_change(self, lambda pw: bool(vault) and vault.check_password(pw))
         if got:
             err = self.vc.change_master_password(*got)
             if err:
@@ -291,8 +330,8 @@ class MainWindow(QMainWindow):
             else:
                 self.toast.show_message("Changing master password…", kind="info")
 
-    def _set_pin(self, dlg: SettingsDialog) -> bool:
-        pin = small_dialogs.ask_new_pin(dlg)
+    def _set_pin(self) -> bool:
+        pin = small_dialogs.ask_new_pin(self)
         if not pin:
             return False
         self.config.pin_salt, self.config.pin_hash = pinlib.make(pin)
@@ -301,14 +340,18 @@ class MainWindow(QMainWindow):
         self.toast.show_message("PIN set", "locking now asks for the PIN")
         return True
 
-    def _pin_toggled(self, dlg: SettingsDialog, on: bool) -> None:
+    def _pin_toggled(self, on: bool) -> None:
+        page = self.settings_page
         if on:
-            dlg.set_pin_checked(self._set_pin(dlg))
+            ok = self._set_pin()
+            if page is not None:
+                page.set_pin_checked(ok)
         else:
             self.config.pin_enabled = False
             self.config.pin_salt = self.config.pin_hash = ""
             self.config.save()
-            dlg.set_pin_checked(False)
+            if page is not None:
+                page.set_pin_checked(False)
 
     # ---- website icons -------------------------------------------------------------
     def _download_icons(self, missing_only: bool) -> None:
