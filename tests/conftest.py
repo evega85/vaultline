@@ -28,8 +28,7 @@ def pytest_sessionfinish(session, exitstatus):
 @pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config):
     if os.environ.get("CI") and _exit_status is not None:
-        print(f"
-pytest session status: {_exit_status}")
+        print(f"pytest session status: {_exit_status}")
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(_exit_status)
