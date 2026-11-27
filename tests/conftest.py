@@ -13,3 +13,21 @@ import pytest  # noqa: E402
 def qapp():
     from PySide6.QtWidgets import QApplication
     return QApplication.instance() or QApplication(sys.argv)
+
+
+# On CI the runner sometimes reports exit code 1 after every test passed: something crashes while
+# Python and Qt shut down. There, end the process with pytest's own result once it has printed it.
+_exit_status = None
+
+
+def pytest_sessionfinish(session, exitstatus):
+    global _exit_status
+    _exit_status = int(exitstatus)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    if os.environ.get("CI") and _exit_status is not None:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(_exit_status)
