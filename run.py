@@ -1,6 +1,7 @@
 """Entry point (also the PyInstaller target).
 
     Vaultline.exe                                  start the app
+    Vaultline.exe --background                     start in the tray (used when Windows signs in)
     Vaultline.exe --selftest demo\\sample.kdbx      open the demo vault (password demo123) and exit:
                                                    0 = OK, 1 = failed. Used by the release build to make
                                                    sure the packaged exe can really decrypt a vault.

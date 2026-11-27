@@ -11,13 +11,22 @@ _FIELD_NAMES = {"password": "password", "username": "username", "otp": "one-time
 ARM_MS = 1200  # Allow stays disabled briefly so a stray Enter or click can't approve
 
 
+def folder_button_text(request) -> str:
+    """ "All of Work, 15 min" / "All of Work until locked": names what the pass would cover."""
+    name = (request.shared_folder.rsplit("/", 1)[-1] or request.shared_folder) if request.shared_folder else "folder"
+    if len(name) > 24:
+        name = name[:23] + "…"
+    sep = " " if request.folder_pass == "until locked" else ", "
+    return f"All of {name}{sep}{request.folder_pass}"
+
+
 class AgentPrompt(QDialog):
     def __init__(self, request, decide, parent: QWidget | None = None):
         super().__init__(parent, Qt.Dialog | Qt.WindowStaysOnTopHint)
         self._decide = decide
         self._done = False
         self.setWindowTitle("Vaultline: agent request")
-        self.setFixedWidth(460)
+        self.setFixedWidth(560 if request.folder_pass else 460)
         self.setAttribute(Qt.WA_DeleteOnClose)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 20, 22, 18)
@@ -40,6 +49,7 @@ class AgentPrompt(QDialog):
             val.setWordWrap(True)
             grid.addWidget(key, i, 0, Qt.AlignTop)
             grid.addWidget(val, i, 1)
+        grid.setColumnStretch(1, 1)  # labels hug their values
         lay.addLayout(grid)
         self.countdown = QLabel()
         self.countdown.setObjectName("Hint")
@@ -52,19 +62,29 @@ class AgentPrompt(QDialog):
         self.deny.setAutoDefault(True)
         self.once = QPushButton("Allow once")
         self.once.setObjectName("Ghost")
-        self.entry = QPushButton(f"Allow this entry for {ALLOW_MINUTES} min")
+        self.entry = QPushButton(f"This entry for {ALLOW_MINUTES} min")
         self.entry.setObjectName("Ghost")
-        for b in (self.once, self.entry):
+        self.entry.setToolTip(f"Allow this entry without asking for {ALLOW_MINUTES} minutes (until a lock)")
+        self.folder = QPushButton(folder_button_text(request))
+        self.folder.setObjectName("Caution")  # the widest grant: looks different from the others
+        shared = request.shared_folder or "the shared folder"
+        self.folder.setToolTip(f"Allow any entry in {shared} (subfolders included) without asking, "
+                               + ("until Vaultline locks" if request.folder_pass == "until locked"
+                                  else f"for {request.folder_pass} (or until a lock)")
+                               + ". Stop it early from the tray icon.")
+        self.folder.setVisible(bool(request.folder_pass))
+        self._allow = (self.once, self.entry, self.folder)
+        for b in self._allow:
             b.setAutoDefault(False)
             b.setEnabled(False)
-        row.addWidget(self.once)
-        row.addWidget(self.entry)
+            row.addWidget(b)
         row.addStretch()
         row.addWidget(self.deny)
         lay.addLayout(row)
         self.deny.clicked.connect(lambda: self._finish("deny"))
         self.once.clicked.connect(lambda: self._finish("once"))
         self.entry.clicked.connect(lambda: self._finish("entry"))
+        self.folder.clicked.connect(lambda: self._finish("folder"))
 
         self._left = PROMPT_SECONDS
         self._tick = QTimer(self, interval=1000)
@@ -75,13 +95,13 @@ class AgentPrompt(QDialog):
         self.deny.setFocus()
 
     def _arm(self) -> None:
-        for b in (self.once, self.entry):
+        for b in self._allow:
             b.setEnabled(True)
 
     def _count(self, start: bool = False) -> None:
         if not start:
             self._left -= 1
-        self.countdown.setText(f"Denied automatically in {max(self._left, 0)} s. "
+        self.countdown.setText(f"Denies automatically in {max(self._left, 0)} s. "
                                "Allow only if you started this.")
 
     def _finish(self, decision: str) -> None:

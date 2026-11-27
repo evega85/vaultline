@@ -14,7 +14,8 @@
 - **Cards.** Card number, password, expiry (MM / YY), card code, website and the bank's phone numbers, with **Card · Pass · Code** buttons.
 - **Safe with cloud sync.** If Google Drive, OneDrive or Dropbox updates the file (say, after you edit on your phone), Vaultline reloads it. When you save, changes made elsewhere are merged in, not overwritten.
 - **Works alongside other KeePass apps.** It's the same standard `.kdbx` (KDBX 4) file you already use in KeePassXC and KeePassium. There's no import and no lock-in.
-- **Also:** folders, website icons, a password generator, PIN quick-unlock, auto-lock, a tray icon, and a dark theme.
+- **Compact view.** Make the window narrow (or press **Ctrl+M**, or the button next to minimise) and it becomes a slim quick-search bar that grows with its results, sticks to the top of the screen, and can stay on top of other windows (📌).
+- **Also:** folders, website icons, a password generator, PIN quick-unlock, auto-lock, quick switching between recent databases (Settings → Database), a tray icon, and a dark theme.
 
 > Vaultline is an independent project. It is not affiliated with or endorsed by KeePass, KeePassXC or KeePassium.
 
@@ -29,7 +30,7 @@
 
 Vaultline remembers which file you opened last. It never remembers your master password.
 
-Closing the window keeps Vaultline in the system tray so it opens instantly next time. Use the tray icon's **Quit** to exit fully.
+The first time you close the window, Vaultline asks whether to keep running in the system tray (so it opens instantly and the shortcut keeps working) or quit. Change it any time in Settings → Windows, where you can also have Vaultline start when you sign in to Windows (it waits in the tray). The tray icon's **Quit** always exits fully.
 
 ![Card details](docs/screenshot-card.png)
 
@@ -48,7 +49,9 @@ Closing the window keeps Vaultline in the system tray so it opens instantly next
 | **Ctrl+E** or double-click | Edit the entry |
 | **Ctrl+N** | New entry |
 | **Ctrl+L** | Lock |
-| **Esc** | Close details → clear search → leave folder → hide to tray |
+| **Ctrl+M** | Switch between the full window and the compact view |
+| **F1** | Help: using the same vault in KeePassXC, KeePassium (iPhone) and KeePassDX (Android) |
+| **Esc** | Close details → clear search → leave folder (it never hides the window) |
 
 Right-click a row for more (copy URL, edit, delete).
 
@@ -84,13 +87,13 @@ Sometimes you want an automated helper, such as a script or an AI agent driving 
 vaultline-cli secret <entry-id> --field password    (or username, otp)
 ```
 
-- **You approve every request.** Vaultline pops up the entry, its website and the program asking, with **Deny** (the default), **Allow once** or **Allow this entry for 15 minutes**. With no answer in 60 seconds, the request is denied.
+- **You approve every request.** Vaultline pops up the entry, its website and the program asking (with the program that started it, as a hint), with **Deny** (the default), **Allow once**, **This entry for 15 min** or **All of** the shared folder (subfolders included) for the time set in Settings (15 minutes by default, 1 hour, until Vaultline locks, or never offered). While a pass is on, the tray menu shows **Stop agent access** to end it early. With no answer in 60 seconds, the request is denied.
 - **Only that folder.** Entries anywhere else, cards, and fields that are references to other entries are refused. The command line can't move entries or folders *into* the shared folder; only you can, in Vaultline.
-- **Only while fully unlocked**, with command-line access on. Locking (by hand, auto-lock or PIN lock) cancels every 15-minute allowance and any open request.
+- **Only while fully unlocked**, with command-line access on. Locking (by hand, auto-lock or PIN lock) cancels every allowance and any open request.
 - **Logged.** Each request is written to `%LOCALAPPDATA%\Vaultline\agent-access.log`: time, entry, field, the program that asked, and allowed or denied. The value itself is never logged.
 - The value is printed bare on standard output so a helper script can pass it straight into a browser field. **The agent should never print, echo or save it.**
 
-**What this does and doesn't protect against.** It limits which entries can be asked for, makes you approve each one, and keeps a record. It is **not** a defence against a harmful program already running under your Windows account: such a program could read the value as it passes, change Vaultline's settings file (the change shows at the next unlock), or simply watch your screen and keyboard. Only share a folder that holds the logins the agent needs. Check what's in it when you turn sharing on, and turn sharing off when you're done.
+**What this does and doesn't protect against.** It limits which entries can be asked for, makes you approve them, and keeps a record. A whole-folder pass means any program running as you could read everything in that folder until the pass ends, so keep it short or leave it off if the folder holds anything sensitive. It is **not** a defence against a harmful program already running under your Windows account: such a program could read the value as it passes, change Vaultline's settings file (the change shows at the next unlock), or simply watch your screen and keyboard. Only share a folder that holds the logins the agent needs. Check what's in it when you turn sharing on, and turn sharing off when you're done.
 
 ---
 

@@ -16,6 +16,7 @@ ACCENT = "#6366f1"
 ACCENT_HOVER = "#7275f5"
 ACCENT_SOFT = "#a5b4fc"
 DANGER = "#f87171"
+DANGER_STRONG = "#dc2626"
 WARN = "#fbbf24"
 SUCCESS = "#4ade80"
 
@@ -54,6 +55,7 @@ QLineEdit#Search {{
     font-size: 15px; padding: 10px 12px; border-radius: 10px; background: {SURFACE};
 }}
 QLineEdit#Search:focus {{ border-color: {BORDER_STRONG}; background: {SURFACE}; }}
+QLineEdit#Search[compact="true"] {{ font-size: 14px; padding: 5px 10px; border-radius: 8px; }}
 QLineEdit#Mono {{ font-family: "{MONO_FONT}", Consolas, monospace; font-size: 13px; }}
 
 /* ---------- buttons ---------- */
@@ -77,6 +79,9 @@ QPushButton#Ghost, QToolButton#Ghost {{
     background: transparent; border: 1px solid transparent; color: {TEXT_2};
 }}
 QPushButton#Ghost:hover, QToolButton#Ghost:hover {{ background: {HOVER}; color: {TEXT}; }}
+QPushButton#Caution {{ background: transparent; border: 1px solid #5c4a1a; color: {WARN}; }}
+QPushButton#Caution:hover {{ background: #2a2414; border-color: {WARN}; }}
+QPushButton#Caution:disabled {{ color: #7a6a3a; border-color: #3a3220; background: transparent; }}
 QPushButton#Link {{
     background: transparent; border: none; padding: 2px 0; color: {ACCENT_SOFT}; font-size: 12px;
 }}
@@ -106,6 +111,13 @@ QComboBox {{
 QComboBox:hover {{ border-color: {BORDER_STRONG}; }}
 QComboBox:focus {{ border-color: {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 24px; }}
+QListView#Suggestions {{
+    background: {RAISED}; border: 1px solid {BORDER_STRONG}; border-radius: 6px; color: {TEXT};
+    selection-background-color: {ACCENT}; selection-color: white; outline: none; padding: 0; font-size: 13px;
+}}
+QListView#Suggestions::item {{ padding: 6px 40px 6px 8px; border-radius: 4px; }}
+QListView#Suggestions::item:hover {{ background: {CHIP_BORDER}; color: {TEXT}; }}
+QListView#Suggestions::item:selected {{ background: {ACCENT}; color: white; }}
 QComboBox QAbstractItemView {{
     background: {RAISED}; border: 1px solid {BORDER_STRONG}; border-radius: 6px;
     selection-background-color: {HOVER}; outline: none; padding: 4px;
@@ -160,6 +172,7 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 /* ---------- text ---------- */
 QLabel {{ background: transparent; }}
 QLabel#Title {{ font-size: 13.5px; font-weight: 600; }}
+QLabel#Title[compact="true"] {{ font-size: 13px; }}
 QLabel#Sub {{ font-size: 12px; color: {TEXT_2}; }}
 QLabel#Muted {{ font-size: 12px; color: {TEXT_3}; }}
 QLabel#FieldLabel {{ font-size: 12px; color: {TEXT_2}; font-weight: 600; }}

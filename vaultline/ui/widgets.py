@@ -5,7 +5,7 @@ import zlib
 
 import pyotp
 from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy, QWidget
 
 from .. import otp as otplib
@@ -38,8 +38,41 @@ class ElidedLabel(QLabel):
         p.drawText(self.rect(), int(self.alignment()) | Qt.AlignVCenter, text)
 
 
+_ICON_STYLE: dict[int, str] = {}
+
+
+def icon_style(pm: QPixmap) -> str:
+    """How to draw a website icon on the dark list:
+    "plain"  - has a transparent background and is light enough: drawn as is, no tile;
+    "tile"   - transparent but too dark to see on dark grey: keeps a light tile behind it;
+    "opaque" - brings its own square background: drawn with rounded corners, no extra tile."""
+    key = pm.cacheKey()
+    if key not in _ICON_STYLE:
+        img = pm.toImage().scaled(24, 24, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        lum_sum = weight = 0.0
+        clear = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                c = img.pixelColor(x, y)
+                a = c.alphaF()
+                if a < 0.1:
+                    clear += 1
+                    continue
+                lum_sum += a * (0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF())
+                weight += a
+        total = img.width() * img.height()
+        if clear < total * 0.08:
+            style = "opaque"
+        elif weight and lum_sum / weight < 0.28:
+            style = "tile"
+        else:
+            style = "plain"
+        _ICON_STYLE[key] = style
+    return _ICON_STYLE[key]
+
+
 class Avatar(QWidget):
-    """Website icon on a light tile, or a coloured letter when there is no icon."""
+    """Website icon (no background when it has none of its own), or a coloured letter."""
 
     def __init__(self, text: str, parent: QWidget | None = None, size: int = 32,
                  pixmap: QPixmap | None = None):
@@ -51,20 +84,33 @@ class Avatar(QWidget):
         idx = zlib.crc32(text.casefold().encode()) % len(theme.AVATAR_COLORS)
         self._color = QColor(theme.AVATAR_COLORS[idx])
 
+    def set_size(self, size: int) -> None:
+        if self.width() != size:
+            self.setFixedSize(size, size)
+            self.update()
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
         r = QRectF(self.rect())
         radius = self.height() * 0.25
-        if self._pixmap is not None and not self._pixmap.isNull():
-            # Favicons are drawn for light backgrounds, so they sit on a light tile.
-            p.setBrush(QColor("#ececef"))
-            p.drawRoundedRect(r, radius, radius)
+        pm = self._pixmap
+        if pm is not None and not pm.isNull():
             p.setRenderHint(QPainter.SmoothPixmapTransform)
-            inset = self.height() * 0.17
+            style = icon_style(pm)
+            if style == "tile":  # dark logo: a light tile so it stays visible
+                p.setBrush(QColor("#ececef"))
+                p.drawRoundedRect(r, radius, radius)
+                inset = self.height() * 0.17
+            elif style == "opaque":  # its own background: just round the corners
+                path = QPainterPath()
+                path.addRoundedRect(r, radius, radius)
+                p.setClipPath(path)
+                inset = 0.0
+            else:
+                inset = self.height() * 0.06
             target = r.adjusted(inset, inset, -inset, -inset)
-            pm = self._pixmap
             scale = min(target.width() / pm.width(), target.height() / pm.height())
             w, h = pm.width() * scale, pm.height() * scale
             p.drawPixmap(QRectF(target.center().x() - w / 2, target.center().y() - h / 2, w, h),

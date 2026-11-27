@@ -141,6 +141,7 @@ def test_deny_timeout_and_allow_once(agent):
     req = ask.asked[-1]
     assert req.title == "AWS Console" and req.field == "otp" and req.folder == "Work"
     assert "python" in req.client.lower() and "PID" in req.client  # the calling program, from the pipe
+    assert "started by python" in req.client.lower(), req.client  # its parent: this pytest run
 
     log = log_text(a)
     for s in SECRETS + ("admin", r["out"]):
@@ -334,3 +335,79 @@ def test_prompt_opens_over_the_vaultline_window(app):
     assert win.screen().availableGeometry().contains(p.frameGeometry())
     p._done = True
     p.close()
+
+
+def test_folder_pass(agent):
+    """'Whole folder' answers later requests for the shared folder without a prompt; everything
+    else (other folders, cards, locks, settings) still applies, and each read is logged."""
+    a = agent
+    a["share"]()
+    run, ask, ids, gate, cfg = a["run"], a["ask"], a["ids"], a["gate"], a["win"].config
+    aws, gh = ids["AWS Console"][:8], ids["GitHub"][:8]
+    assert cfg.agent_folder_pass == 15  # the default
+    ask.answers = ["folder"]
+    assert run("secret", aws)["out"] == "aws-pass"
+    assert ask.asked[-1].folder_pass == "15 min" and ask.asked[-1].shared_folder == "Work"
+    left = gate.folder_pass_left()
+    assert gate.folder_pass_active() and 14 * 60 < left <= 15 * 60
+    assert run("secret", aws, "--field", "username")["out"] == "admin" and len(ask.asked) == 1  # no prompt
+    r = run("secret", gh)  # outside the shared folder: still refused, pass or not
+    assert r["code"] == 1 and "isn't in the folder shared" in r["err"]
+    assert "allowed, folder pass 15 min" in log_text(a) and "allowed (folder pass)" in log_text(a)
+
+    gate.stop()  # the tray's "Stop agent access"
+    assert not gate.has_allowances() and "all allowances ended by user" in log_text(a)
+    ask.answers = ["deny"]
+    assert run("secret", aws)["code"] == 1 and len(ask.asked) == 2
+
+    # GitHub and Netflix moved into the shared folder: they come without asking, until a lock
+    from vaultline.vault import MoveEntries
+    a["vc"].apply([MoveEntries([ids["GitHub"], ids["Netflix"]], a["work"].uuid)])
+    assert wait_for(a["app"], lambda: sum(v.group_uuid == a["work"].uuid for v in a["vc"].snapshot.entries) == 3)
+    cfg.agent_folder_pass = -1
+    ask.answers = ["folder"]
+    assert run("secret", gh)["out"] == "gh-pass" and ask.asked[-1].folder_pass == "until locked"
+    assert gate.folder_pass_left() == float("inf")
+    n = len(ask.asked)
+    assert run("secret", ids["Netflix"][:8])["out"] == "n-pass" and len(ask.asked) == n
+    a["share"](on=False)  # sharing changed: refused, and the pass is gone
+    assert run("secret", aws)["code"] == 1
+    a["share"]()
+    ask.answers = ["deny"]
+    assert run("secret", aws)["code"] == 1 and len(ask.asked) == n + 1 and not gate.folder_pass_active()
+    ask.answers = ["folder"]
+    assert run("secret", gh)["out"] == "gh-pass"
+    a["vc"].lock()
+    a["app"].processEvents()
+    assert not gate.has_allowances()
+    unlock(a["app"], a["win"], a["vc"])
+
+    # not offered: no folder button, and a stale "folder" answer counts as once
+    cfg.agent_folder_pass = 0
+    ask.answers = ["folder"]
+    assert run("secret", gh)["out"] == "gh-pass" and ask.asked[-1].folder_pass == ""
+    assert not gate.has_allowances()
+    cfg.agent_folder_pass = 7  # anything unexpected in config.json: not offered either
+    ask.answers = ["deny"]
+    run("secret", gh)
+    assert ask.asked[-1].folder_pass == ""
+    for s in SECRETS:
+        assert s not in log_text(a)
+
+
+def test_folder_pass_prompt_button(agent):
+    from vaultline.ui.agent_prompt import AgentPrompt
+    req = agent_access.Request("id", "Title", "user", "", "Work", "password", "x.exe (PID 1)", lambda r: None,
+                               folder_pass="1 hour", shared_folder="Work/Agents")
+    got = []
+    dlg = AgentPrompt(req, got.append)
+    assert dlg.folder.isVisibleTo(dlg) and dlg.folder.text() == "All of Agents, 1 hour" and not dlg.folder.isEnabled()
+    assert "Work/Agents" in dlg.folder.toolTip() and "subfolders" in dlg.folder.toolTip()
+    assert dlg.folder.objectName() == "Caution" and "Denies automatically" in dlg.countdown.text()
+    dlg._arm()
+    dlg.folder.click()
+    assert got == ["folder"]
+    req.folder_pass = ""
+    dlg2 = AgentPrompt(req, got.append)
+    assert not dlg2.folder.isVisibleTo(dlg2)
+    dlg2.close()

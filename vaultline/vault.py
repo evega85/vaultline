@@ -28,7 +28,7 @@ import re
 import time
 import uuid as uuidlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pyotp
@@ -150,6 +150,44 @@ class CustomField:
     key: str
     value: str
     protected: bool = False
+
+
+def create_vault(path: str | Path, password: str) -> None:
+    """Write a new, empty KDBX 4 database (AES-256, Argon2d) that KeePassXC and KeePassium open.
+
+    Built in memory from pykeepass's blank template (new KDF salt and seeds on save, new root-folder
+    UUID so it's not shared with every other database made this way), checked by decrypting it again,
+    then written next to the target and renamed into place. Never replaces an existing file."""
+    from pykeepass.pykeepass import BLANK_DATABASE_LOCATION, BLANK_DATABASE_PASSWORD
+
+    target = Path(path)
+    if not password:
+        raise VaultError("Choose a master password.")
+    if target.exists():
+        raise VaultError("A file with that name already exists. Choose another name.")
+    kp = PyKeePass(BLANK_DATABASE_LOCATION, BLANK_DATABASE_PASSWORD)
+    kp.password, kp.keyfile = password, None
+    kp.root_group.uuid = uuidlib.uuid4()
+    now = datetime.now(timezone.utc)
+    kp.root_group.ctime = kp.root_group.mtime = kp.root_group.atime = now  # not the template's 2020
+    kp.database_name = target.stem
+    buf = io.BytesIO()
+    kp.save(buf)
+    data = buf.getvalue()
+    check = PyKeePass(io.BytesIO(data), password)
+    if check.root_group.uuid != kp.root_group.uuid:
+        raise VaultError("The new database could not be verified; nothing was written.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.vaultline-tmp")
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    try:
+        os.rename(tmp, target)  # fails on Windows if the name was taken meanwhile: never overwrites
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise VaultError(f"Could not create the database: {exc}") from exc
 
 
 @dataclass(eq=False)

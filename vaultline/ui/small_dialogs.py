@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRegularExpression
 from PySide6.QtGui import QRegularExpressionValidator
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from .. import pin as pinlib
 
@@ -63,6 +63,32 @@ def confirm(parent: QWidget, title: str, text: str, ok_text: str = "OK", danger:
     ok = d.buttons(ok_text, danger)
     ok.clicked.connect(d.accept)
     return d.exec() == QDialog.Accepted
+
+
+def ask_close(parent: QWidget) -> tuple[str, bool] | None:
+    """The window's X: ("tray" | "quit", remember the choice), or None to cancel."""
+    d = _Base(parent, "Close Vaultline?",
+              "Keep it running in the tray (next to the clock) so the shortcut and the command line still "
+              "work, or quit it completely?")
+    remember = QCheckBox("Remember my choice (you can change it in Settings)")
+    d.body.addWidget(remember)
+    row = QHBoxLayout()
+    row.addStretch()
+    choice: dict = {}
+    for text, value, name in (("Cancel", None, "Ghost"), ("Quit", "quit", "Ghost"), ("Keep in tray", "tray", "Primary")):
+        b = QPushButton(text)
+        b.setObjectName(name)
+        if value is None:
+            b.clicked.connect(d.reject)
+        else:
+            b.clicked.connect(lambda _=False, v=value: (choice.update(v=v), d.accept()))
+        if value == "tray":
+            b.setDefault(True)
+        row.addWidget(b)
+    d.lay.addLayout(row)
+    if d.exec() != QDialog.Accepted or "v" not in choice:
+        return None
+    return choice["v"], remember.isChecked()
 
 
 def ask_text(parent: QWidget, title: str, label: str, value: str = "", placeholder: str = "") -> str | None:

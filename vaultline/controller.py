@@ -16,7 +16,7 @@ from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal, Slot
 from . import favicons, pin as pinlib
 from .config import BACKUP_DIR, Config
 from .vault import (ChangeMasterPassword, EntryEdit, EntryView, FileUnreadable, IconUpdate, Snapshot, Vault,
-                    VaultError, WrongCredentials)
+                    VaultError, WrongCredentials, create_vault)
 
 
 class VaultController(QObject):
@@ -89,6 +89,16 @@ class VaultController(QObject):
         self.lock(full=True, emit=False)
         vault = Vault(path, password, keyfile, BACKUP_DIR, self.config.backups_to_keep)
         self._submit("unlock", vault.open, vault)
+
+    def create(self, path: str, password: str) -> None:
+        """Create a new empty database, then open it (reported like an unlock)."""
+        self.lock(full=True, emit=False)
+        vault = Vault(path, password, None, BACKUP_DIR, self.config.backups_to_keep)
+
+        def run():
+            create_vault(path, password)
+            return vault.open()
+        self._submit("unlock", run, vault)
 
     def pin_unlock(self, pin: str) -> bool:
         """Check the PIN; on success reopen the database in the background."""

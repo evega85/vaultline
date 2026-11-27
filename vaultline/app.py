@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from . import APP_NAME, icons, pipe_name, theme
 from .agent_access import AgentGate
+from .autostart import BACKGROUND_ARG
 from .cli_server import CliServer
 from .clipboard import SecureClipboard
 from .config import Config
@@ -49,20 +50,28 @@ class IdleLock(QObject):
             self.vc.lock("Locked after inactivity.")
 
 
+def _auto_lock_text(minutes: int) -> str:
+    return f"Auto-lock after {minutes} minute{'' if minutes == 1 else 's'}"
+
+
 class Tray(QObject):
-    def __init__(self, window: MainWindow, controller: VaultController, config: Config):
+    def __init__(self, window: MainWindow, controller: VaultController, config: Config, gate=None):
         super().__init__(window)
-        self.win, self.vc, self.config = window, controller, config
+        self.win, self.vc, self.config, self.gate = window, controller, config, gate
         self.icon = QSystemTrayIcon(icons.locked_tray_icon(), window)
         self.icon.setToolTip(f"{APP_NAME} (locked)")
 
         menu = QMenu()
         self.show_action = menu.addAction("Show", self.toggle)
         self.lock_action = menu.addAction("Lock Vault", lambda: self.vc.lock())
-        self.lock_full_action = menu.addAction("Lock completely (needs master password)",
+        self.lock_full_action = menu.addAction("Lock completely",
                                                lambda: self.vc.lock(full=True))
+        menu.addAction("Switch database…", self.win.switch_database)
+        self.settings_action = menu.addAction("Settings…", self.win.show_settings)
+        self.stop_agents_action = menu.addAction("Stop agent access", self._stop_agents)
+        self.icon_action = menu.addAction("Shrink to a floating icon", self._toggle_icon)
         menu.addSeparator()
-        self.auto_action = QAction(f"Auto-lock after {config.auto_lock_minutes} minutes", menu, checkable=True)
+        self.auto_action = QAction(_auto_lock_text(config.auto_lock_minutes), menu, checkable=True)
         self.auto_action.setChecked(config.auto_lock_enabled)
         self.auto_action.toggled.connect(self._set_auto_lock)
         menu.addAction(self.auto_action)
@@ -75,6 +84,8 @@ class Tray(QObject):
 
         self._told_about_tray = False
         window.hidden_to_tray.connect(self._hint_once)
+        window.quit_requested.connect(self.quit)
+        window.can_quit = True
         controller.unlocked.connect(lambda *_: self._set_locked(False))
         controller.locked.connect(lambda *_: self._set_locked(True))
         controller.pin_locked.connect(lambda *_: self._set_locked(True))
@@ -87,8 +98,21 @@ class Tray(QObject):
     def _refresh(self) -> None:
         self.show_action.setText("Hide" if self.win.isVisible() else "Show")
         self.lock_action.setEnabled(self.vc.is_unlocked)
+        self.settings_action.setEnabled(self.vc.is_unlocked)
         self.lock_full_action.setEnabled(self.vc.is_unlocked or self.vc.is_pin_locked)
         self.lock_full_action.setVisible(self.vc.pin_available)
+        self.stop_agents_action.setVisible(self.gate is not None and self.gate.has_allowances())
+        if self.gate is not None:
+            left = self.gate.folder_pass_left()
+            when = "" if left is None else " (folder: until locked)" if left == float("inf") \
+                else f" (folder: {max(1, round(left / 60))} min left)"
+            self.stop_agents_action.setText("Stop agent access" + when)
+        self.icon_action.setText("Open full window" if self.win.icon_mode else "Shrink to a floating icon")
+        # Settings may have changed auto-lock since the menu was built
+        self.auto_action.blockSignals(True)
+        self.auto_action.setText(_auto_lock_text(self.config.auto_lock_minutes))
+        self.auto_action.setChecked(self.config.auto_lock_enabled)
+        self.auto_action.blockSignals(False)
 
     def _activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
@@ -99,6 +123,18 @@ class Tray(QObject):
             self.win.hide_to_tray()
         else:
             self.win.bring_to_front()
+
+    def _stop_agents(self) -> None:
+        if self.gate is not None:
+            self.gate.stop()
+            self.icon.showMessage(APP_NAME, "Agent access stopped. Agents have to ask again.",
+                                  QSystemTrayIcon.Information, 2500)
+
+    def _toggle_icon(self) -> None:
+        if self.win.icon_mode:
+            self.win.leave_icon_mode(full=True)
+        else:
+            self.win.enter_icon_mode()
 
     def _set_auto_lock(self, on: bool) -> None:
         self.config.auto_lock_enabled = on
@@ -143,6 +179,7 @@ def _single_instance(window_getter) -> QLocalServer | None:
     return server
 
 
+
 def main() -> int:
     if sys.platform == "win32":
         try:
@@ -182,13 +219,15 @@ def main() -> int:
     window.settings_saved.connect(gate.reset)
     cli = CliServer(controller, app, gate=gate)
     cli.changed_by_cli.connect(lambda summary: window.toast.show_message("Command line", summary, "info", 3000))
-    tray = Tray(window, controller, config) if QSystemTrayIcon.isSystemTrayAvailable() else None
+    tray = Tray(window, controller, config, gate) if QSystemTrayIcon.isSystemTrayAvailable() else None
     if tray is None:
         window.allow_close = True
         app.setQuitOnLastWindowClosed(True)
         app.aboutToQuit.connect(lambda: (clipboard.wipe(), controller.shutdown()))
 
-    window.show()
+    # The window, or the floating icon when it was left in icon mode. A Windows sign-in start
+    # (--background) stays in the tray, which needs a tray to come back from.
+    window.start(background=tray is not None and BACKGROUND_ARG in sys.argv[1:])
     code = app.exec()
     server.close()
     return code

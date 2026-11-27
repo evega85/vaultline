@@ -134,10 +134,15 @@ def test_search_shortcuts_and_clipboard(setup):
     assert view.current().title != first
     QTest.keyClick(search, Qt.Key_Up)
     assert view.current().title == first
-    # Esc with empty search hides the window
+    # Esc with nothing left to clear does nothing: it never hides Vaultline
     QTest.keyClick(search, Qt.Key_Escape)
-    assert not win.isVisible()
-    win.bring_to_front()
+    assert win.isVisible()
+    # the x in the search box clears it, shown only while there's text
+    assert not view.clear_action.isVisible()
+    QTest.keyClicks(search, "net")
+    assert view.clear_action.isVisible()
+    view.clear_action.trigger()
+    assert search.text() == "" and not view.clear_action.isVisible() and search.hasFocus()
 
     # clipboard wipe only clears our own value
     clip.wipe()
@@ -550,7 +555,7 @@ def test_lock_clears_everything(setup):
 def test_settings_is_a_page(setup):
     app, win, vc, clip, db = setup
     unlock(app, win, vc)
-    win.vault_view.settings_btn.click()
+    win.vault_view.settings_action.trigger()
     page = win.settings_page
     assert page is not None and win.stack.currentWidget() is page
     shot(win, "settings-page")
@@ -559,7 +564,7 @@ def test_settings_is_a_page(setup):
     assert win.settings_page is None and win.stack.currentWidget() is win.vault_view
     assert win.config.clipboard_clear_seconds == 42 and clip.clear_seconds == 42
 
-    win.vault_view.settings_btn.click()
+    win.vault_view.settings_action.trigger()
     win.settings_page.clip.setValue(15)
     vc.lock(full=True)  # locking while the page is open saves it and shows the lock screen
     assert wait_for(app, lambda: win.stack.currentWidget() is win.unlock_view)
@@ -569,7 +574,7 @@ def test_settings_is_a_page(setup):
 def test_window_reopens_where_it_was(setup):
     app, win, vc, clip, db = setup
     area = app.primaryScreen().availableGeometry()
-    win.setGeometry(area.x() + 40, area.y() + 30, 600, 450)
+    win.setGeometry(area.x() + 40, area.y() + 30, 740, 450)
     app.processEvents()
     before = win.geometry()
     win.hide_to_tray()  # also what happens before Quit from the tray
@@ -582,3 +587,509 @@ def test_window_reopens_where_it_was(setup):
         win2.allow_close = True
         win2.vc.shutdown()
         win2.close()
+
+
+def test_recent_databases_and_switch(setup, tmp_path):
+    app, win, vc, clip, db = setup
+    other = tmp_path / "other.kdbx"
+    create_database(str(other), password="other-pw").save()
+    cfg = win.config
+    cfg.remember_database(str(other))
+    unlock(app, win, vc)
+    assert [r["path"] for r in cfg.recent_databases] == [str(db), str(other)]  # newest first, no repeats
+    assert cfgmod.Config.load().recent_databases == cfg.recent_databases     # saved; paths only
+
+    from vaultline.ui.unlock_view import recent_choices
+    choices = recent_choices(cfg.recent_databases, vc.path)
+    assert [c["path"] for c in choices] == [str(other)]  # the open one isn't offered again
+
+    win.open_settings()  # Settings > Open another database > other.kdbx
+    win.settings_page.open_database.emit(str(other), "")
+    app.processEvents()
+    assert win.settings_page is None and not vc.is_unlocked and not vc.is_pin_locked
+    assert win.stack.currentWidget() is win.unlock_view
+    unlock(app, win, vc, pw="other-pw")
+    assert vc.is_unlocked and Path(vc.path) == other
+    assert cfg.recent_databases[0]["path"] == str(other)
+
+    win.open_settings()  # Settings > Close database: full lock
+    win.settings_page.close_database.emit()
+    app.processEvents()
+    assert not vc.is_unlocked and not vc.is_pin_locked and win.stack.currentWidget() is win.unlock_view
+
+
+def test_recent_list_is_capped_and_skips_missing(tmp_path):
+    cfg = Config()
+    for i in range(10):
+        cfg.remember_database(str(tmp_path / f"v{i}.kdbx"))
+    assert len(cfg.recent_databases) == Config.RECENT_MAX
+    assert cfg.recent_databases[0]["path"].endswith("v9.kdbx")
+    from vaultline.ui.unlock_view import UnlockView
+    view = UnlockView()
+    view.set_recent(cfg.recent_databases)
+    assert view.recent_choices() == []  # none of those files exist
+
+
+def test_icon_style(app):
+    from PySide6.QtGui import QColor, QPixmap
+    from vaultline.ui.widgets import icon_style
+
+    def icon(fill, dot):
+        pm = QPixmap(32, 32)
+        pm.fill(QColor(fill))
+        if dot is not None:
+            from PySide6.QtGui import QPainter
+            p = QPainter(pm)
+            p.fillRect(8, 8, 16, 16, QColor(dot))
+            p.end()
+        return pm
+    assert icon_style(icon("transparent", "#f5a623")) == "plain"  # bright logo, no background
+    assert icon_style(icon("transparent", "#111111")) == "tile"   # dark logo: keeps a light tile
+    assert icon_style(icon("#ffffff", "#1877f2")) == "opaque"     # brings its own square
+
+
+def test_settings_numbers_and_tray_follow_settings(setup):
+    app, win, vc, clip, db = setup
+    from vaultline.app import Tray
+    unlock(app, win, vc)
+    tray = Tray(win, vc, win.config)
+    win.open_settings()
+    page = win.settings_page
+    assert page.minutes.suffix() == "" and page.clip.suffix() == ""  # the unit is in the label
+    assert "(minutes)" in page.auto.text()
+    page.auto.setChecked(True)
+    page.minutes.setValue(20)
+    page.clip.setValue(30)
+    win.close_settings()
+    assert win.config.auto_lock_minutes == 20 and win.config.clipboard_clear_seconds == 30
+    tray._refresh()  # runs as the tray menu opens
+    assert tray.auto_action.text() == "Auto-lock after 20 minutes" and tray.auto_action.isChecked()
+    tray.icon.hide()
+
+
+def test_title_bar_holds_the_vault_controls(setup):
+    app, win, vc, clip, db = setup
+    tb = win.titlebar
+    assert not tb.title.isVisible() and not win.vault_view.top_bar.isVisible()  # lock screen: its own big logo, bar stays empty
+    unlock(app, win, vc)
+    assert win.vault_view.top_bar.parentWidget() is tb and win.vault_view.top_bar.isVisible()
+    assert not tb.title.isVisible()
+
+    tb.set_window_buttons(True)  # off Windows they're hidden (the system frame has its own)
+    app.processEvents()
+
+    def hit(widget, x=8, y=8):
+        return tb.hit(widget.mapTo(tb, QPoint(x, y)))
+
+    # what Windows is told: drag areas, the maximise button (snap layouts), and normal controls
+    assert hit(tb.logo) == "caption" and hit(tb.drag_space) == "caption"
+    assert hit(tb.max_btn) == "max"
+    for w in (win.vault_view.search, win.vault_view.add_btn, win.vault_view.folder_btn,
+              win.vault_view.lock_btn, tb.min_btn, tb.close_btn):
+        assert hit(w) is None, w
+    assert tb.hit(QPoint(-1, 5)) is None and tb.hit(QPoint(5, tb.height() + 2)) is None
+
+    win.open_settings()  # other screens show the app name again
+    assert tb.title.isVisible() and not win.vault_view.top_bar.isVisible()
+    win.close_settings()
+    assert win.vault_view.top_bar.isVisible()
+
+    tb.set_maximized(True)
+    assert tb.max_btn.kind == "restore"
+    vc.lock(full=True)
+    assert wait_for(app, lambda: win.stack.currentWidget() is win.unlock_view)
+    assert not tb.title.isVisible()  # lock screen: its own big logo, no name in the bar
+
+
+def _visible(view):
+    return [v.title for i, v in enumerate(view._views) if not view.list.isRowHidden(i)]
+
+
+def test_compact_lists_nothing_until_asked(setup, monkeypatch):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    view = win.vault_view
+    assert not win.compact and len(_visible(view)) == 5
+    win.resize(600, 480)  # narrow window = compact view
+    app.processEvents()
+    assert win.compact and view.compact and win.titlebar.compact
+    assert not view.footer.isVisible() and not view.menu_btn.isVisible() and view.pin_btn.isVisible()
+    assert not view.list.isVisible() and not view.empty.isVisible() and view.current() is None
+    assert win.height() == win.titlebar.height() + 8  # idle palette: just the bar
+    QTest.keyClick(view.search, Qt.Key_Return)  # nothing selected: Enter copies nothing
+    assert QGuiApplication.clipboard().text() != "gh-pass"
+    shot(win, "compact-idle")
+
+    QTest.keyClicks(view.search, "git")  # results as you type
+    assert _visible(view) == ["GitHub"] and view.list.isVisible()
+    assert win.height() == win.titlebar.height() + 48 + 2 + 8  # grows with the results
+    QTest.keyClick(view.search, Qt.Key_Return)  # shortcuts still work
+    assert QGuiApplication.clipboard().text() == "gh-pass"
+    shot(win, "compact-search")
+    view.search.clear()
+    assert _visible(view) == []
+
+    view.set_folder(next(g for g in view.groups if g.name == "Work"))  # or open a folder
+    assert _visible(view) == ["AWS Console"]
+    view.set_folder(None)
+    assert _visible(view) == []
+
+    opened = []
+    from vaultline.ui.entry_dialog import EntryDialog
+    monkeypatch.setattr(EntryDialog, "exec", lambda dlg: opened.append(dlg.width()) or 0)
+    view.add_btn.click()  # Add opens the form, sized for the compact window
+    assert opened and opened[0] <= max(win.frameGeometry().width(), 360)
+
+
+def test_compact_details_on_click(setup):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    view = win.vault_view
+    win.resize(600, 480)
+    app.processEvents()
+    QTest.keyClicks(view.search, "o")
+    _click_row(app, view, "Google")
+    assert view.panel.isVisible() and view.panel.view.title == "Google"
+    wait_for(app, lambda: False, 0.3)
+    assert view.panel.width() >= view.width() - 20  # over the results, full width
+    view.panel.copy_text.emit("Username", "someone@example.com")
+    assert QGuiApplication.clipboard().text() == "someone@example.com"
+    QTest.keyClick(view.search, Qt.Key_B, Qt.ControlModifier)
+    assert QGuiApplication.clipboard().text() == "someone@example.com"
+    QTest.keyClick(view.search, Qt.Key_Escape)
+    assert not view.panel.isVisible()
+
+
+def test_compact_pin_is_remembered(setup):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    view = win.vault_view
+    assert view.pin_btn.isVisible() and not win.on_top  # in the full window too; not pinned at first
+    view.pin_btn.click()
+    app.processEvents()
+    assert win.on_top and cfgmod.Config.load().compact_pinned
+    win.resize(600, 480)  # stays pinned when it becomes the palette
+    app.processEvents()
+    assert win.compact and view.pin_btn.isVisible() and win.on_top
+
+    win.hide_to_tray()  # the size and the pin come back next time
+    saved = cfgmod.Config.load()
+    win2 = MainWindow(saved, VaultController(saved, app), clip)
+    try:
+        win2.show()
+        app.processEvents()
+        assert win2.compact and win2.vault_view.pin_btn.isChecked() and win2.on_top
+    finally:
+        win2.allow_close = True
+        win2.vc.shutdown()
+        win2.close()
+
+
+def test_switching_size_keeps_search_and_selection(setup):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    view = win.vault_view
+    QTest.keyClicks(view.search, "e")
+    QTest.keyClick(view.search, Qt.Key_Down)
+    chosen = view.current().title
+    win.resize(600, 480)
+    app.processEvents()
+    assert win.compact and view.search.text() == "e" and view.current().title == chosen
+    win.resize(800, 560)
+    app.processEvents()
+    assert not win.compact and view.search.text() == "e" and view.current().title == chosen
+
+    view.search.clear()  # empty search: compact lists nothing, normal brings the selection back
+    QTest.keyClick(view.search, Qt.Key_Down)
+    chosen = view.current().title
+    win.resize(600, 480)
+    app.processEvents()
+    assert view.current() is None
+    win.resize(800, 560)
+    app.processEvents()
+    assert view.current().title == chosen and len(_visible(view)) == 5
+
+
+
+def test_palette_height_help_and_card_enter(setup):
+    app, win, vc, clip, db = setup
+    kp = PyKeePass(str(db), password=PW)
+    card = kp.add_entry(kp.root_group, "Visa test", "", "")
+    card.set_custom_property("card_number", "4111111111111111", protect=True)
+    kp.save()
+    unlock(app, win, vc)
+    view = win.vault_view
+    win.resize(800, 520)
+    app.processEvents()
+    win.resize(600, 520)  # into the palette: the full view's height is remembered
+    app.processEvents()
+    assert win.compact and win.config.full_height == 520
+    QTest.keyClicks(view.search, "e")
+    shown = len(_visible(view))
+    assert win.height() == min(480, win.titlebar.height() + shown * 50 + 8)
+    view.open_details()
+    app.processEvents()
+    assert win.height() == 480  # details get the full (capped) height
+    QTest.keyClick(view.search, Qt.Key_Escape)
+    app.processEvents()
+    assert win.height() < 480
+    win.resize(800, win.height())  # widened again: back to the full view at its own height
+    app.processEvents()
+    assert not win.compact and win.height() == 520
+
+    view.search.clear()
+    QTest.keyClicks(view.search, "visa")
+    QTest.keyClick(view.search, Qt.Key_Return)  # a card without a password: Enter copies the number
+    assert QGuiApplication.clipboard().text() == "4111111111111111"
+
+    QTest.keyClick(view.search, Qt.Key_F1)
+    assert win.help_page is not None and win.stack.currentWidget() is win.help_page
+    texts = " ".join(w.text() for w in win.help_page.findChildren(QLabel))
+    assert "KeePassium" in texts and "KeePassDX" in texts and "Database > Import" in texts
+    QTest.keyClick(win.help_page, Qt.Key_Escape)
+    assert win.help_page is None and win.stack.currentWidget() is view
+    view.help_action.trigger()
+    vc.lock(full=True)  # a lock closes it
+    assert wait_for(app, lambda: win.stack.currentWidget() is win.unlock_view) and win.help_page is None
+
+
+def test_view_button_ctrl_m_and_edges(setup):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    view, tb = win.vault_view, win.titlebar
+    win.resize(740, 500)
+    app.processEvents()
+    assert not win.compact and tb.mode_btn.isVisible() and tb.mode_btn.kind == "collapse"
+    tb.mode_btn.click()  # full -> palette, at the palette's own width
+    app.processEvents()
+    assert win.compact and win.width() == 600 and tb.mode_btn.kind == "expand"
+    assert win.config.full_width == 740 and win.config.full_height == 500
+    QTest.keyClicks(view.search, "goo")
+    QTest.keyClick(view.search, Qt.Key_M, Qt.ControlModifier)  # Ctrl+M back to the full window
+    app.processEvents()
+    assert not win.compact and (win.width(), win.height()) == (740, 500) and view.search.text() == "goo"
+    QTest.keyClick(view.search, Qt.Key_M, Qt.ControlModifier)
+    app.processEvents()
+    assert win.compact
+
+    # empty strip under the results moves the window; the results themselves don't
+    assert win._hit(QPoint(300, win.height() - 3)) == "caption"
+    row = view.list.visualItemRect(view.list.item(next(i for i, v in enumerate(view._views) if v.title == "Google")))
+    assert win._hit(view.list.viewport().mapTo(win, row.center())) is None
+
+    # bottom edge: pull the palette down to open the full window, push it back up to return
+    win._size_move_started()
+    start_h = win.compact_height()
+    assert win._sizing_height(600, start_h + 20, 6) == (600, start_h)      # a little: stays
+    assert win._sizing_height(600, start_h + 100, 6) == (740, 420)         # far enough: full window
+    win.resize(740, 500)
+    app.processEvents()
+    win._size_move_started()
+    assert win._sizing_height(740, 400, 6) == (740, 420)                   # not past the limit
+    assert win._sizing_height(740, 300, 6) == (600, win.compact_height())  # far enough: palette
+    assert tb.mode_btn.isVisible()
+    vc.lock(full=True)
+    assert wait_for(app, lambda: win.stack.currentWidget() is win.unlock_view)
+    assert not tb.mode_btn.isVisible()  # only the vault list has two views
+
+
+def test_create_a_new_database(setup, tmp_path):
+    app, win, vc, clip, db = setup
+    uv = win.unlock_view
+    uv._path = ""
+    uv._refresh()
+    assert uv.welcome.isVisibleTo(uv) and not uv.password.isVisibleTo(uv)  # first visit: create or open
+    uv.create_database()
+    dlg = uv._new_dialog
+    target = tmp_path / "Fresh.kdbx"
+    dlg.path.setText(str(target))
+    dlg.password.setText("short")
+    dlg.confirm.setText("short")
+    dlg._accept()
+    assert dlg.isVisible() and "8 characters" in dlg.error.text()
+    dlg.password.setText("a long secret 1")
+    dlg.confirm.setText("a long secret 2")
+    dlg._accept()
+    assert dlg.isVisible() and "match" in dlg.error.text()
+    dlg.confirm.setText("a long secret 1")
+    dlg._accept()
+    assert wait_for(app, lambda: vc.is_unlocked) and vc.path == str(target)
+    assert win.stack.currentWidget() is win.vault_view and vc.snapshot.entries == []
+    assert win.config.last_database == str(target)
+    vc.lock(full=True)  # next visit: the usual password screen for that database
+    assert wait_for(app, lambda: win.stack.currentWidget() is win.unlock_view)
+    assert uv.password.isVisibleTo(uv) and not uv.welcome.isVisibleTo(uv) and uv._path == str(target)
+    from pykeepass import PyKeePass
+    kp = PyKeePass(str(target), "a long secret 1")  # a normal KDBX 4 file
+    assert kp.version == (4, 0) and kp.kdf_algorithm == "argon2"
+
+
+def test_create_never_overwrites(tmp_path):
+    from vaultline.vault import VaultError, create_vault
+    target = tmp_path / "Taken.kdbx"
+    target.write_bytes(b"not mine")
+    with pytest.raises(VaultError):
+        create_vault(target, "a long secret 1")
+    assert target.read_bytes() == b"not mine"
+
+
+def test_username_suggestions(setup, monkeypatch):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    from vaultline.ui.entry_dialog import EntryDialog, known_usernames
+    names = known_usernames(vc.snapshot.entries)
+    assert "someone@example.com" in names
+    assert len({n.casefold() for n in names}) == len(names)  # no duplicates
+    assert not any(v.is_card and v.username in names for v in vc.snapshot.entries if v.username)
+
+    seen = []
+
+    def typed(dlg):
+        dlg.show()
+        dlg.username.setFocus()
+        QTest.keyClicks(dlg.username, "EXAMPLE")  # matches anywhere, any case
+        app.processEvents()
+        comp = dlg.username.completer()
+        seen.extend(comp.completionModel().index(i, 0).data() for i in range(comp.completionCount()))
+        comp.popup().hide()
+        return 0
+
+    monkeypatch.setattr(EntryDialog, "exec", typed)
+    win.vault_view.add_btn.click()
+    assert "someone@example.com" in seen
+
+
+def test_username_suggestion_hide_and_return(setup, monkeypatch):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    from vaultline.ui.entry_dialog import EntryDialog, _SuggestionDelegate
+
+    def shown(dlg):
+        comp = dlg.username.completer()
+        return [comp.completionModel().index(i, 0).data() for i in range(comp.completionCount())]
+
+    def hide_with_x_and_delete(dlg):
+        dlg.show()
+        dlg.username.setFocus()
+        QTest.keyClicks(dlg.username, "example")
+        app.processEvents()
+        popup = dlg.username.completer().popup()
+        assert popup.isVisible() and set(shown(dlg)) == {"someone@example.com", "family@example.com"}
+        # click the × on the first row
+        idx = popup.model().index(0, 0)
+        first = idx.data()
+        x = _SuggestionDelegate.x_rect(popup.visualRect(idx)).center()
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+        QApplication.sendEvent(popup.viewport(), QMouseEvent(QEvent.MouseMove, QPointF(x), QPointF(x),
+                                                             Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+        assert popup.itemDelegate().hot_row == 0  # the × goes red under the mouse
+        QTest.mouseClick(popup.viewport(), Qt.LeftButton, pos=x)
+        app.processEvents()
+        assert first not in shown(dlg) and popup.isVisible()
+        assert dlg.username.text() == "example"  # the × didn't pick it
+        # Delete on the highlighted one
+        popup.setCurrentIndex(popup.model().index(0, 0))
+        QTest.keyClick(popup, Qt.Key_Delete)
+        app.processEvents()
+        assert shown(dlg) == [] and not popup.isVisible()
+        return 0
+
+    monkeypatch.setattr(EntryDialog, "exec", hide_with_x_and_delete)
+    win.vault_view.add_btn.click()
+    cfg = win.config
+    assert cfg.username_hidden("someone@example.com") and cfg.username_hidden("Family@Example.com")
+    assert "example.com" not in cfgmod.CONFIG_FILE.read_text(encoding="utf-8")  # hashes only
+
+    seen = []
+
+    def reopen_and_save(dlg):
+        seen.extend(dlg.username.completer().model().stringList())
+        dlg.title.setText("Shop")
+        dlg.username.setText("family@example.com")  # used again
+        dlg.password.setText("x")
+        dlg._accept()
+        return 1
+
+    monkeypatch.setattr(EntryDialog, "exec", reopen_and_save)
+    win.vault_view.add_btn.click()
+    assert "someone@example.com" not in seen and "family@example.com" not in seen
+    assert not cfg.username_hidden("family@example.com") and cfg.username_hidden("someone@example.com")
+
+
+def test_close_button_choices(setup, monkeypatch):
+    app, win, vc, clip, db = setup
+    from vaultline.ui import small_dialogs
+    quits = []
+    win.quit_requested.connect(lambda: quits.append(1))
+    win.can_quit = True  # as the tray sets it
+    asked = []
+
+    def answer(result):
+        def fake(parent):
+            asked.append(1)
+            return result
+        monkeypatch.setattr(small_dialogs, "ask_close", fake)
+
+    assert win.config.close_action == "ask"  # the first X asks
+    answer(None)  # Cancel: nothing happens
+    win.close()
+    app.processEvents()
+    assert asked and win.isVisible() and not quits
+
+    answer(("tray", False))  # to the tray, not remembered
+    win.close()
+    app.processEvents()
+    assert not win.isVisible() and win.config.close_action == "ask" and not quits
+
+    win.show()
+    answer(("quit", True))  # quit, remembered
+    win.close()
+    app.processEvents()
+    assert quits == [1] and cfgmod.Config.load().close_action == "quit"
+
+    asked.clear()
+    win.config.close_action = "tray"  # set in Settings: no question
+    win.show()
+    win.close()
+    app.processEvents()
+    assert not asked and not win.isVisible() and quits == [1]
+
+
+def test_windows_settings_and_background_start(setup, monkeypatch):
+    app, win, vc, clip, db = setup
+    from vaultline import autostart
+    calls = []
+    monkeypatch.setattr(autostart, "supported", lambda: True)
+    monkeypatch.setattr(autostart, "is_enabled", lambda: False)
+    monkeypatch.setattr(autostart, "set_enabled", lambda on: calls.append(on) or True)
+    unlock(app, win, vc)
+    win.vault_view.settings_action.trigger()
+    page = win.settings_page
+    assert page.autostart.isEnabled() and not page.autostart.isChecked()
+    page.autostart.setChecked(True)
+    page.close_action.setCurrentIndex(page.close_action.findData("quit"))
+    QTest.keyClick(page, Qt.Key_Escape)
+    assert calls == [True] and win.config.close_action == "quit"
+
+    win.vault_view.settings_action.trigger()  # unchanged: the registry isn't touched again
+    monkeypatch.setattr(autostart, "is_enabled", lambda: True)
+    QTest.keyClick(win.settings_page, Qt.Key_Escape)
+    assert calls == [True]
+
+    win.hide()
+    vc.lock(full=True)
+    app.processEvents()
+    win.start(background=True)  # a Windows sign-in start: stays in the tray
+    app.processEvents()
+    assert not win.isVisible()
+    win.start()
+    assert win.isVisible() and win.stack.currentWidget() is win.unlock_view
+
+
+def test_autostart_command_points_at_exe(monkeypatch):
+    from vaultline import autostart
+    monkeypatch.setattr(autostart.sys, "executable", r"C:\Apps\Vaultline\Vaultline.exe")
+    assert autostart.command() == r'"C:\Apps\Vaultline\Vaultline.exe" --background'
+    monkeypatch.setattr(autostart.sys, "frozen", False, raising=False)
+    assert not autostart.supported() and not autostart.set_enabled(True)  # never from source

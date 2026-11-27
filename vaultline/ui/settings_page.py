@@ -7,12 +7,14 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QDesktopServices, QKeyEvent, QKeySequence
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QMenu, QPushButton,
+                               QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
-from .. import icons, theme
+from .. import autostart, hotkey, icons, theme
+from ..agent_access import folder_pass_minutes
 from ..config import BACKUP_DIR, Config
+from .unlock_view import recent_choices
 
 
 def _section(title: str) -> tuple[QFrame, QVBoxLayout]:
@@ -61,10 +63,13 @@ class SettingsPage(QWidget):
     change_pin = Signal()
     download_icons = Signal(bool)    # True = missing only
     done = Signal()                  # back arrow / Esc: MainWindow saves and returns to the list
+    open_database = Signal(str, str)  # path, keyfile ("" path = browse for one)
+    close_database = Signal()
 
     def __init__(self, config: Config, db_path: str, groups=()):
         super().__init__()
         self.config = config
+        self._db_path = db_path
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -121,20 +126,52 @@ class SettingsPage(QWidget):
         lay.addLayout(_row(self.pin, self.pin_change))
         lay.addWidget(_hint("The master password is still needed when Vaultline starts, and after 3 wrong PINs. "
                             "Tray > “Lock completely” also asks for it."))
-        self.auto = QCheckBox("Auto-lock after")
+        self.auto = QCheckBox("Auto-lock after (minutes)")
         self.auto.setChecked(config.auto_lock_enabled)
         self.minutes = QSpinBox()
         self.minutes.setRange(1, 240)
         self.minutes.setValue(config.auto_lock_minutes)
-        self.minutes.setSuffix(" min of inactivity")
-        self.minutes.setFixedWidth(170)
+        self.minutes.setFixedWidth(80)
+        self.minutes.setToolTip("Minutes without using Vaultline before it locks")
         lay.addLayout(_row(self.auto, self.minutes))
         self.clip = QSpinBox()
         self.clip.setRange(5, 300)
         self.clip.setValue(config.clipboard_clear_seconds)
-        self.clip.setSuffix(" s")
-        self.clip.setFixedWidth(90)
-        lay.addLayout(_row(QLabel("Clear copied items after"), self.clip))
+        self.clip.setFixedWidth(80)
+        lay.addLayout(_row(QLabel("Clear copied items after (seconds)"), self.clip))
+        root.addWidget(box)
+
+        # global shortcut
+        box, lay = _section("SHORTCUT")
+        self.hotkey_on = QCheckBox("Open the search from any program with")
+        self.hotkey_on.setChecked(config.hotkey_enabled)
+        self.hotkey_keys = QKeySequenceEdit(QKeySequence.fromString(config.hotkey or hotkey.DEFAULT))
+        self.hotkey_keys.setMaximumSequenceLength(1)
+        self.hotkey_keys.setFixedWidth(160)
+        self.hotkey_keys.setToolTip("Click, then press the keys you want")
+        self.hotkey_keys.keySequenceChanged.connect(self._check_hotkey)
+        lay.addLayout(_row(self.hotkey_on, self.hotkey_keys))
+        self.hotkey_hint = _hint("Click the box and press the keys you want. Use Ctrl, Alt or Win with a key, "
+                                 "for example Ctrl+Alt+Space. Press it again to put the search away.")
+        lay.addWidget(self.hotkey_hint)
+        root.addWidget(box)
+
+        # starting and closing
+        box, lay = _section("WINDOWS")
+        self.autostart = QCheckBox("Start Vaultline when I sign in to Windows")
+        self._autostart_was = autostart.is_enabled()
+        self.autostart.setChecked(self._autostart_was)
+        self.autostart.setEnabled(autostart.supported())
+        lay.addWidget(self.autostart)
+        lay.addWidget(_hint("It waits in the tray (or as the floating icon) until you need it."
+                            if autostart.supported() else "Only the installed Vaultline.exe can start with Windows."))
+        self.close_action = QComboBox()
+        for text, value in (("Ask me", "ask"), ("Keep running in the tray", "tray"), ("Quit Vaultline", "quit")):
+            self.close_action.addItem(text, value)
+        self.close_action.setCurrentIndex(max(0, self.close_action.findData(config.close_action)))
+        lay.addLayout(_row(QLabel("When I close the window"), self.close_action))
+        lay.addWidget(_hint("In the tray, the shortcut, the command line and auto-lock keep working. "
+                            "Quit from the tray icon's menu at any time."))
         root.addWidget(box)
 
         # icons
@@ -178,12 +215,21 @@ class SettingsPage(QWidget):
             self.folder.setCurrentIndex(i)
         self.folder.setMinimumWidth(200)
         lay.addLayout(_row(self.share, self.folder))
+        self.folder_pass = QComboBox()
+        for minutes, text in ((15, "15 minutes"), (60, "1 hour"), (-1, "until Vaultline locks"),
+                              (0, "never (ask every time)")):
+            self.folder_pass.addItem(text, minutes)
+        self.folder_pass.setCurrentIndex(max(0, self.folder_pass.findData(folder_pass_minutes(config))))
+        self.folder_pass.setMinimumWidth(200)
+        self.folder_pass_label = QLabel("Allow the whole folder for")
+        lay.addLayout(_row(self.folder_pass_label, self.folder_pass))
         self.share_hint = _hint("With this on, vaultline-cli secret can ask for the username, password or "
                                 "one-time code of an entry in this folder or its subfolders, for example so an "
-                                "agent can sign in to a website. Vaultline asks you every time (or allows one "
-                                "entry for 15 minutes) and logs each request, never the value. Locking cancels "
-                                "every allowance. This limits and records access; it doesn't protect against "
-                                "a harmful program already running on this PC.")
+                                "agent can sign in to a website. Vaultline asks you each time: allow once, "
+                                "allow that entry for 15 minutes, or allow the whole folder for the time "
+                                "above. Every request is logged, never the value. Locking, or Stop agent "
+                                "access in the tray, ends every allowance. This limits and records access; "
+                                "it doesn't protect against a harmful program already running on this PC.")
         lay.addWidget(self.share_hint)
         self.cli.toggled.connect(self._sync_share)
         self.share.toggled.connect(self._sync_share)
@@ -202,10 +248,15 @@ class SettingsPage(QWidget):
         path.setTextInteractionFlags(Qt.TextSelectableByMouse)
         path.setObjectName("Sub")
         lay.addWidget(path)
+        self.open_other = QPushButton("Open another database…")
+        self.open_other.clicked.connect(self._open_other)
+        self.close_db = QPushButton("Close database")
+        self.close_db.setToolTip("Lock completely: the master password is needed to open it again")
+        self.close_db.clicked.connect(self.close_database)
         backups = QPushButton("Open backups folder")
         backups.setObjectName("Ghost")
         backups.clicked.connect(self._open_backups)
-        lay.addLayout(_row(backups))
+        lay.addLayout(_row(self.open_other, self.close_db, backups, stretch_after=2))
         root.addWidget(box)
 
         root.addStretch()
@@ -213,6 +264,7 @@ class SettingsPage(QWidget):
     def _sync_share(self, *_):
         self.share.setEnabled(self.cli.isChecked())
         self.folder.setEnabled(self.cli.isChecked() and self.share.isChecked())
+        self.folder_pass.setEnabled(self.cli.isChecked() and self.share.isChecked())
 
     def set_pin_checked(self, on: bool) -> None:
         self.pin.blockSignals(True)
@@ -220,9 +272,33 @@ class SettingsPage(QWidget):
         self.pin.blockSignals(False)
         self.pin_change.setEnabled(on)
 
+    def _open_other(self) -> None:
+        """Recent databases in a menu, plus Browse. Straight to Browse when there are none."""
+        choices = recent_choices(self.config.recent_databases, self._db_path)
+        if not choices:
+            self.open_database.emit("", "")
+            return
+        menu = QMenu(self)
+        for r in choices:
+            p = Path(r["path"])
+            act = menu.addAction(f"{p.name}    ({p.parent.name or p.parent})")
+            act.setToolTip(str(p))
+            act.triggered.connect(lambda _=False, r=r: self.open_database.emit(r["path"], r.get("keyfile", "")))
+        menu.setToolTipsVisible(True)
+        menu.addSeparator()
+        menu.addAction("Browse…", lambda: self.open_database.emit("", ""))
+        menu.popup(self.open_other.mapToGlobal(self.open_other.rect().bottomLeft()))
+
     def _open_backups(self) -> None:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(BACKUP_DIR)))
+
+    def hotkey_text(self) -> str:
+        return self.hotkey_keys.keySequence().toString(QKeySequence.PortableText)
+
+    def _check_hotkey(self, *_):
+        ok = hotkey.parse(self.hotkey_text()) is not None
+        self.hotkey_hint.setStyleSheet("" if ok else f"color: {theme.DANGER};")
 
     def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
         if e.key() == Qt.Key_Escape:
@@ -237,8 +313,16 @@ class SettingsPage(QWidget):
         c.clipboard_clear_seconds = self.clip.value()
         c.auto_download_icons = self.icons_auto.isChecked()
         c.cli_enabled = self.cli.isChecked()
+        c.hotkey_enabled = self.hotkey_on.isChecked()
+        if hotkey.parse(self.hotkey_text()) is not None:  # an unusable combination keeps the old one
+            c.hotkey = self.hotkey_text()
         folder = self.folder.currentData() or ""
         c.agent_share_enabled = bool(self.share.isChecked() and folder)
         c.agent_folder_uuid = folder if c.agent_share_enabled else ""
+        c.agent_folder_pass = self.folder_pass.currentData()
+        c.close_action = self.close_action.currentData()
         c.save()
+        if self.autostart.isEnabled() and self.autostart.isChecked() != self._autostart_was:
+            if autostart.set_enabled(self.autostart.isChecked()):
+                self._autostart_was = self.autostart.isChecked()
 

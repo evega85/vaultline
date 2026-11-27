@@ -9,6 +9,7 @@ from ..vault import EntryView
 from .widgets import Avatar, ElidedLabel, OtpButton
 
 ROW_HEIGHT = 58
+COMPACT_ROW_HEIGHT = 48
 
 
 class EntryRow(QWidget):
@@ -18,11 +19,12 @@ class EntryRow(QWidget):
         super().__init__(parent)
         self.view = view
         self.setAttribute(Qt.WA_TranslucentBackground)
-        lay = QHBoxLayout(self)
+        lay = self._lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 0, 10, 0)
         lay.setSpacing(12)
 
-        lay.addWidget(Avatar(view.title or view.url or "?", pixmap=pixmap))
+        self.avatar = Avatar(view.title or view.url or "?", pixmap=pixmap)
+        lay.addWidget(self.avatar)
 
         text = QVBoxLayout()
         text.setSpacing(1)
@@ -73,14 +75,23 @@ class EntryRow(QWidget):
             b.setFixedSize(98, 26)
             b.setEnabled(bool(view.card_code))
             b.clicked.connect(lambda: self.copy_requested.emit("card_code"))
-            lay.addWidget(b)
+            self.third = b
         elif view.totp is not None:
             self.otp_btn = OtpButton(view.totp)
             self.otp_btn.clicked.connect(lambda: self.copy_requested.emit("otp"))
-            lay.addWidget(self.otp_btn)
+            self.third = self.otp_btn
         else:
-            spacer = QWidget()
-            spacer.setFixedSize(98, 26)  # keeps the User/Pass columns aligned
-            lay.addWidget(spacer)
+            self.third = QWidget()
+            self.third.setFixedSize(98, 26)  # keeps the User/Pass columns aligned
+        lay.addWidget(self.third)
 
         self.setFixedHeight(ROW_HEIGHT)
+
+    def set_compact(self, on: bool) -> None:
+        """Compact window: shorter rows, smaller icon; all the copy buttons stay."""
+        self.setFixedHeight(COMPACT_ROW_HEIGHT if on else ROW_HEIGHT)
+        self.avatar.set_size(28 if on else 32)
+        self._lay.setContentsMargins(10 if on else 12, 0, 8 if on else 10, 0)
+        self._lay.setSpacing(10 if on else 12)
+        self.title.setProperty("compact", on)
+        self.title.style().polish(self.title)

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QLineEdit
 from .. import icons, theme
 from ..vault import EntryView, GroupView, Snapshot
 from .detail_panel import DetailPanel
-from .entry_row import ROW_HEIGHT, EntryRow
+from .entry_row import COMPACT_ROW_HEIGHT, ROW_HEIGHT, EntryRow
 from .folder_popup import FolderPopup
 
 
@@ -31,12 +31,17 @@ class VaultView(QWidget):
     add_requested = Signal()
     edit_requested = Signal(object)        # EntryView
     lock_requested = Signal()
-    hide_requested = Signal()
     delete_requested = Signal(object)      # EntryView
     settings_requested = Signal()
     folder_create_requested = Signal()
     folder_rename_requested = Signal(str)  # folder uuid
     folder_delete_requested = Signal(str)
+    pin_toggled = Signal(bool)             # compact window: keep on top
+    content_changed = Signal()             # compact window: the results' height changed
+    help_requested = Signal()
+    mode_requested = Signal()              # Ctrl+M: palette <-> full window
+    icon_requested = Signal()              # menu: shrink to the floating icon
+    escape_unused = Signal()               # Esc with nothing left to step back from
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -45,13 +50,17 @@ class VaultView(QWidget):
         self._groups: list[GroupView] = []
         self._pixmaps: dict[str, QPixmap] = {}
         self._folder: GroupView | None = None
+        self.compact = False
+        self._last_uuid: str | None = None  # last selected entry, so a view switch can bring it back
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 0)
+        root = self._root = QVBoxLayout(self)
+        root.setContentsMargins(16, 4, 16, 0)
         root.setSpacing(12)
 
-        # top bar
-        bar = QHBoxLayout()
+        # top bar: MainWindow shows it inside the title bar (see titlebar.TitleBar.set_controls)
+        self.top_bar = QWidget()
+        bar = QHBoxLayout(self.top_bar)
+        bar.setContentsMargins(0, 0, 8, 0)
         bar.setSpacing(8)
         self.folder_btn = QPushButton()
         self.folder_btn.setObjectName("FolderBtn")
@@ -68,27 +77,44 @@ class VaultView(QWidget):
         self.search.setObjectName("Search")
         self.search.setPlaceholderText("Search vault…")
         self.search.addAction(icons.glyph(icons.SEARCH, theme.TEXT_3, 16), QLineEdit.LeadingPosition)
+        self.clear_action = self.search.addAction(icons.glyph(icons.CLOSE, theme.TEXT_2, 12), QLineEdit.TrailingPosition)
+        self.clear_action.setToolTip("Clear search (Esc)")
+        self.clear_action.setVisible(False)
+        self.clear_action.triggered.connect(self._clear_search)
+        self.search.textChanged.connect(lambda t: self.clear_action.setVisible(bool(t)))
         self.search.textChanged.connect(self._apply_filter)
         self.search.installEventFilter(self)
+        self.search.setMaximumWidth(640)  # leaves empty title bar to drag on wide windows
         bar.addWidget(self.search, 1)
 
-        self.add_btn = QPushButton("  Add")
-        self.add_btn.setObjectName("Primary")
-        self.add_btn.setIcon(icons.glyph(icons.ADD, "white", 14))
-        self.add_btn.setToolTip("New entry (Ctrl+N)")
-        self.add_btn.setFocusPolicy(Qt.NoFocus)
-        self.add_btn.setCursor(Qt.PointingHandCursor)
-        self.add_btn.setFixedHeight(42)
+        self.add_btn = _top_button(icons.ADD, "New entry (Ctrl+N)")
         self.add_btn.clicked.connect(self.add_requested)
         bar.addWidget(self.add_btn)
-
-        self.settings_btn = _top_button(icons.SETTINGS, "Settings")
-        self.settings_btn.clicked.connect(self.settings_requested)
-        bar.addWidget(self.settings_btn)
         self.lock_btn = _top_button(icons.LOCK, "Lock vault (Ctrl+L)")
         self.lock_btn.clicked.connect(self.lock_requested)
         bar.addWidget(self.lock_btn)
-        root.addLayout(bar)
+
+        self.pin_btn = _top_button(icons.PIN, "Keep on top")
+        self.pin_btn.setCheckable(True)
+        self.pin_btn.toggled.connect(self._pin_changed)
+        bar.addWidget(self.pin_btn)
+
+        # ☰ menu (full window): Settings and Help, so the search box gets the room
+        self.menu_btn = _top_button(icons.MENU, "Menu")
+        self.menu = QMenu(self.menu_btn)
+        self.settings_action = self.menu.addAction(icons.glyph(icons.SETTINGS, theme.TEXT_2, 16), "Settings")
+        self.settings_action.triggered.connect(self.settings_requested)
+        self.help_action = self.menu.addAction(icons.glyph(icons.HELP, theme.TEXT_2, 16),
+                                               "Help: other devices	F1")
+        self.help_action.triggered.connect(self.help_requested)
+        self.menu.addSeparator()
+        self.icon_action = self.menu.addAction("Shrink to a floating icon")
+        self.icon_action.triggered.connect(self.icon_requested)
+        self.menu_btn.clicked.connect(lambda: self.menu.popup(
+            self.menu_btn.mapToGlobal(self.menu_btn.rect().bottomRight())
+            - QPoint(self.menu.sizeHint().width(), -4)))
+        bar.addWidget(self.menu_btn)
+        bar.addStretch(0)
 
         # list
         self.list = QListWidget()
@@ -98,9 +124,11 @@ class VaultView(QWidget):
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.list.verticalScrollBar().setSingleStep(24)
         self.list.setUniformItemSizes(True)
+        self.list.setMinimumHeight(1)  # the compact window can be as short as its results
         self.list.itemClicked.connect(self._row_clicked)
         self.list.itemDoubleClicked.connect(lambda it: self._edit_row(self.list.row(it)))
         self.list.currentRowChanged.connect(self._follow_selection)
+        self.list.currentRowChanged.connect(self._remember_row)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
         root.addWidget(self.list, 1)
@@ -134,6 +162,7 @@ class VaultView(QWidget):
         self.panel.edit_requested.connect(self.edit_requested)
         self.panel.delete_requested.connect(self.delete_requested)
         self.panel.closed.connect(self.focus_search)
+        self.panel.closed.connect(self._content_changed)
 
         self._otp_timer = QTimer(self, interval=500)
         self._otp_timer.timeout.connect(self._tick_otp)
@@ -171,8 +200,9 @@ class VaultView(QWidget):
         self._views, self._rows = snap.entries, []
         for v in snap.entries:
             item = QListWidgetItem()
-            item.setSizeHint(QSize(0, ROW_HEIGHT))
+            item.setSizeHint(QSize(0, self.row_height))
             row = EntryRow(v, self.pixmap_for(v))
+            row.set_compact(self.compact)
             row.copy_requested.connect(lambda kind, it=item: self._row_copy(it, kind))
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
@@ -201,6 +231,7 @@ class VaultView(QWidget):
         self.panel.close_panel()
         self.list.clear()
         self._views, self._rows, self._groups, self._pixmaps = [], [], [], {}
+        self._last_uuid = None
         self._folder = None
         self._update_folder_button()
         self.search.blockSignals(True)
@@ -241,7 +272,8 @@ class VaultView(QWidget):
     # ---- folders --------------------------------------------------------------
     def _update_folder_button(self) -> None:
         name = self._folder.name if self._folder else "All"
-        self.folder_btn.setText(f" {name if len(name) <= 16 else name[:15] + '…'}")
+        self.folder_btn.setText("" if self.compact else f" {name if len(name) <= 16 else name[:15] + '…'}")
+        self.folder_btn.setToolTip(f"Folder: {name}" if self.compact else "Show one folder")
         self.folder_btn.setProperty("active", self._folder is not None)
         self.folder_btn.style().polish(self.folder_btn)
 
@@ -268,12 +300,93 @@ class VaultView(QWidget):
         p = self._folder.display
         return v.group == p or v.group.startswith(p + " / ")
 
-    # ---- filtering & navigation ---------------------------------------------
+    # ---- compact window (a narrow window: the quick-search palette) ------------------
+    def set_compact(self, on: bool) -> None:
+        """One slim row (folder, search, Add, pin, lock), results only once you search or pick a
+        folder, shorter rows, details over the results. Search, folder and selection stay as they are."""
+        if on == self.compact:
+            return
+        keep = self.current().uuid if self.current() else self._last_uuid
+        self.compact = on
+        h = 36 if on else 42
+        self.folder_btn.setFixedHeight(h)
+        for b in (self.add_btn, self.pin_btn, self.lock_btn, self.menu_btn):
+            b.setFixedSize(h, h)
+        self.folder_btn.setMinimumWidth(h if on else 0)
+        self.folder_btn.setMaximumWidth(h if on else 16777215)
+        if on:
+            self.search.setFixedHeight(h)
+        else:  # natural height again: the style's padding decides, so text is never clipped
+            self.search.setMinimumHeight(0)
+            self.search.setMaximumHeight(16777215)
+        self.search.setProperty("compact", on)
+        self.search.style().polish(self.search)
+        self.search.setPlaceholderText("Search…" if on else "Search vault…")
+        self.menu_btn.setVisible(not on)
+        self.top_bar.layout().setContentsMargins(0, 0, 0 if on else 8, 0)  # the title bar keeps a drag gap
+        self.footer.setVisible(not on)
+        self.empty.setStyleSheet(f"font-size: 13px; color: {theme.TEXT_3}; padding: {14 if on else 40}px;")
+        m = 8 if on else 16
+        self._root.setContentsMargins(m, 0 if on else 4, m, m if on else 0)
+        rh = self.row_height
+        for i, row in enumerate(self._rows):
+            row.set_compact(on)
+            self.list.item(i).setSizeHint(QSize(0, rh))
+        self._update_folder_button()
+        self._apply_filter(keep_uuid=keep)
+        if self.panel.isVisible():
+            QTimer.singleShot(0, lambda: self.panel.setGeometry(self._panel_rect()))
+
+    @property
+    def row_height(self) -> int:
+        return COMPACT_ROW_HEIGHT if self.compact else ROW_HEIGHT
+
+    def compact_content_height(self) -> int | None:
+        """Height the compact window needs below its title bar; None = as tall as allowed."""
+        if self.panel.isVisible():
+            return None
+        bottom = self._root.contentsMargins().bottom()
+        if self.list.isVisible():
+            shown = sum(1 for i in range(self.list.count()) if not self.list.isRowHidden(i))
+            return shown * (self.row_height + 2) + bottom  # +2: the item's 1px margins
+        if self.empty.isVisible():
+            return self.empty.sizeHint().height() + bottom
+        return bottom
+
+    def _content_changed(self) -> None:
+        if self.compact:
+            self.content_changed.emit()
+
+    def set_pinned(self, on: bool) -> None:
+        self.pin_btn.blockSignals(True)
+        self.pin_btn.setChecked(on)
+        self.pin_btn.blockSignals(False)
+        self._pin_look(on)
+
+    def _pin_changed(self, on: bool) -> None:
+        self._pin_look(on)
+        self.pin_toggled.emit(on)
+        self.focus_search()
+
+    def _pin_look(self, on: bool) -> None:
+        # pinned: the filled head with the outline (and its needle) drawn over it, as Windows does
+        self.pin_btn.setIcon(icons.layered([(icons.PIN_FILL, theme.ACCENT_SOFT), (icons.PIN, theme.ACCENT_SOFT)], 16)
+                             if on else icons.glyph(icons.PIN, theme.TEXT_2, 16))
+        self.pin_btn.setStyleSheet(
+            f"QPushButton {{ background: rgba(99, 102, 241, 0.22); border: 1px solid rgba(99, 102, 241, 0.45); }}"
+            f"QPushButton:hover {{ background: rgba(99, 102, 241, 0.32); }}" if on else "")
+        self.pin_btn.setToolTip("Kept on top (click to stop)" if on else "Keep on top")
+
+    def _idle(self) -> bool:
+        """Compact window with nothing asked for yet: list nothing."""
+        return self.compact and not self.search.text().strip() and self._folder is None
+
     def _apply_filter(self, _text: str = "", keep_uuid: str | None = None) -> None:
         terms = self.search.text().lower().split()
+        idle = self._idle()
         first_visible, keep_row = -1, -1
         for i, v in enumerate(self._views):
-            show = self._in_folder(v) and (v.matches(terms) if terms else True)
+            show = not idle and self._in_folder(v) and (v.matches(terms) if terms else True)
             self.list.setRowHidden(i, not show)
             if show:
                 if first_visible < 0:
@@ -288,7 +401,7 @@ class VaultView(QWidget):
             self.list.setCurrentRow(-1)
         has = first_visible >= 0
         self.list.setVisible(has)
-        self.empty.setVisible(not has)
+        self.empty.setVisible(not has and not (idle and self._views))  # idle palette: just the bar
         if not has:
             self.panel.close_panel()
             if not self._views:
@@ -298,6 +411,9 @@ class VaultView(QWidget):
             else:
                 self.empty.setText("This folder is empty")
         self.update_status()
+        self._content_changed()
+
+    # ---- filtering & navigation ---------------------------------------------
 
     def _move(self, step: int) -> None:
         n = self.list.count()
@@ -366,12 +482,17 @@ class VaultView(QWidget):
         self.panel.setGeometry(self._panel_rect())
         self.panel.open_at(self._panel_rect().topLeft(), animate=True)
         self.focus_search()
+        self._content_changed()  # the compact window grows to make room
 
     def toggle_details(self) -> None:
         if self.panel.isVisible():
             self.panel.close_panel()
         else:
             self.open_details()
+
+    def _remember_row(self, row: int) -> None:
+        if 0 <= row < len(self._views):
+            self._last_uuid = self._views[row].uuid
 
     def _follow_selection(self, row: int) -> None:
         if self.panel.isVisible() and 0 <= row < len(self._views) and not self.list.isRowHidden(row):
@@ -380,13 +501,14 @@ class VaultView(QWidget):
                 self.panel.show_entry(v, self.pixmap_for(v))
 
     def _panel_rect(self):
+        m = 8 if self.compact else 16
         top = self.list.geometry().top() if self.list.isVisible() else self.empty.geometry().top()
-        bottom = self.footer.geometry().top() - 8
-        w = self.width() - 32
+        bottom = self.footer.geometry().top() - 8 if self.footer.isVisible() else self.height() - m
+        w = self.width() - 2 * m
         pw = w if w < 600 else max(360, min(440, int(w * 0.6)))
         r = self.rect()
-        r.setLeft(self.width() - 16 - pw)
-        r.setRight(self.width() - 16)
+        r.setLeft(self.width() - m - pw)
+        r.setRight(self.width() - m)
         r.setTop(top)
         r.setBottom(bottom)
         return r
@@ -415,6 +537,7 @@ class VaultView(QWidget):
                 Qt.Key_Return: lambda: self._copy_current("password"),
                 Qt.Key_Enter: lambda: self._copy_current("password"),
                 Qt.Key_Escape: self._escape,
+                Qt.Key_F1: self.help_requested.emit,
             }
         elif ctrl:
             actions = {
@@ -424,6 +547,7 @@ class VaultView(QWidget):
                 Qt.Key_E: lambda: self._edit_row(self.list.currentRow()),
                 Qt.Key_I: self.toggle_details,
                 Qt.Key_L: self.lock_requested.emit,
+                Qt.Key_M: self.mode_requested.emit,
             }
             # Ctrl+C copies the password unless the user selected text in the search box.
             if not self.search.hasSelectedText():
@@ -441,7 +565,13 @@ class VaultView(QWidget):
         if v is not None:
             self.copy_requested.emit(kind, v)
 
+    def _clear_search(self) -> None:
+        self.search.clear()
+        self.search.setFocus()
+
     def _escape(self) -> None:
+        """Esc steps back: details, then the search, then the folder. It never hides the window
+        (in icon mode, a last Esc shrinks the panel back to the icon: escape_unused)."""
         if self.panel.isVisible():
             self.panel.close_panel()
         elif self.search.text():
@@ -449,4 +579,4 @@ class VaultView(QWidget):
         elif self._folder is not None:
             self.set_folder(None)
         else:
-            self.hide_requested.emit()
+            self.escape_unused.emit()

@@ -29,6 +29,10 @@ DELETE = "\uE74D"
 SETTINGS = "\uE713"
 CARD = "\uE8C7"
 BACK = "\uE72B"
+PIN = "\uE718"
+PIN_FILL = "\uE841"
+HELP = "\uE897"
+MENU = "\uE700"  # GlobalNavigationButton (three lines)
 
 
 def glyph_font(px: int) -> QFont:
@@ -39,6 +43,12 @@ def glyph_font(px: int) -> QFont:
 
 
 def glyph(char: str, color: str = theme.TEXT_2, px: int = 16) -> QIcon:
+    return layered([(char, color)], px)
+
+
+def layered(layers: list[tuple[str, str]], px: int = 16) -> QIcon:
+    """Glyphs drawn on top of each other, bottom first. Fluent "…Fill" glyphs are only the solid
+    part (a pin's head without its needle); Windows draws the outline glyph over them."""
     icon = QIcon()
     for scale in (1, 2):
         size = px * scale
@@ -47,8 +57,9 @@ def glyph(char: str, color: str = theme.TEXT_2, px: int = 16) -> QIcon:
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
         p.setFont(glyph_font(size))
-        p.setPen(QColor(color))
-        p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, char)
+        for char, color in layers:
+            p.setPen(QColor(color))
+            p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, char)
         p.end()
         pm.setDevicePixelRatio(scale)
         icon.addPixmap(pm)

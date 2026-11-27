@@ -1,10 +1,11 @@
 """Add / edit entry dialog: standard fields, folder, TOTP, custom fields."""
 from __future__ import annotations
 
-from PySide6.QtCore import QRegularExpression, QSize, Qt, QTimer
-from PySide6.QtGui import QRegularExpressionValidator
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QPlainTextEdit, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QObject, QRect, QRegularExpression, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QRegularExpressionValidator
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QCompleter, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+                               QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .. import icons, otp as otplib, passgen, theme
 from ..vault import (CARD_BRAND_KEY, CARD_CODE_KEY, CARD_LOCAL_PHONE_KEY, CARD_PHONE_KEY, CARD_HOLDER_KEY, CARD_MONTH_KEY, CARD_NUMBER_KEY,
@@ -44,6 +45,111 @@ def card_fields(number: str, code: str, exp: tuple[str, str] | None, year4: bool
     if local_phone:
         out.append(CustomField(CARD_LOCAL_PHONE_KEY, local_phone, False))
     return out
+
+
+def known_usernames(views) -> list[str]:
+    """Usernames already in the vault, most used first, for the Username field's suggestions.
+
+    Cards are skipped (older layouts kept the card number in the username) and so are references.
+    """
+    counts: dict[str, int] = {}
+    spelling: dict[str, str] = {}
+    for v in views:
+        name = (v.username or "").strip()
+        if not name or v.is_card or "username" in v.references or name.upper().startswith("{REF:"):
+            continue
+        key = name.casefold()
+        counts[key] = counts.get(key, 0) + 1
+        spelling.setdefault(key, name)
+    return [spelling[k] for k in sorted(counts, key=lambda k: (-counts[k], k))]
+
+
+class _SuggestionDelegate(QStyledItemDelegate):
+    """Draws an × on the highlighted suggestion, like Outlook's address list; red under the mouse."""
+    X_WIDTH = 36
+    X_BOX = 24
+    X_GLYPH = 13
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.hot_row = -1  # row whose × the mouse is over
+
+    @classmethod
+    def x_rect(cls, rect: QRect) -> QRect:
+        return QRect(rect.right() - cls.X_WIDTH + 1, rect.top(), cls.X_WIDTH, rect.height())
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if not option.state & (QStyle.State_MouseOver | QStyle.State_Selected):
+            return
+        centre = self.x_rect(option.rect).center()
+        hot = index.row() == self.hot_row
+        if hot:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(theme.DANGER_STRONG))
+            disc = QRect(0, 0, self.X_BOX, self.X_BOX)
+            disc.moveCenter(centre)
+            painter.drawRoundedRect(disc, 6, 6)
+            painter.restore()
+        box = QRect(0, 0, self.X_GLYPH, self.X_GLYPH)
+        box.moveCenter(centre)
+        icons.glyph(icons.CLOSE, "#ffffff" if hot else theme.TEXT, self.X_GLYPH).paint(painter, box)
+
+
+class _SuggestionRemover(QObject):
+    """Clicking a suggestion's × (or Delete on the highlighted one) stops suggesting it."""
+
+    def __init__(self, completer: QCompleter, on_hide):
+        super().__init__(completer)
+        self.completer, self.on_hide = completer, on_hide
+        popup = completer.popup()
+        popup.setMouseTracking(True)
+        self.delegate = _SuggestionDelegate(popup)
+        popup.setItemDelegate(self.delegate)
+        popup.setToolTip("Click × or press Delete to stop suggesting this one")
+        popup.installEventFilter(self)  # installed after QCompleter's own filter, so it runs first
+        popup.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        popup = self.completer.popup()
+        t = ev.type()
+        if obj is popup.viewport() and t in (QEvent.MouseMove, QEvent.Leave, QEvent.Hide):
+            hot = -1
+            if t == QEvent.MouseMove:
+                pos = ev.position().toPoint()
+                idx = popup.indexAt(pos)
+                if idx.isValid() and _SuggestionDelegate.x_rect(popup.visualRect(idx)).contains(pos):
+                    hot = idx.row()
+            if hot != self.delegate.hot_row:
+                self.delegate.hot_row = hot
+                popup.viewport().update()
+            return False
+        if obj is popup.viewport() and t in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease,
+                                             QEvent.MouseButtonDblClick):
+            pos = ev.position().toPoint()
+            idx = popup.indexAt(pos)
+            if idx.isValid() and _SuggestionDelegate.x_rect(popup.visualRect(idx)).contains(pos):
+                if t == QEvent.MouseButtonRelease:
+                    self.remove(idx.data())
+                return True
+        elif obj is popup and t == QEvent.KeyPress and ev.key() == Qt.Key_Delete:
+            idx = popup.currentIndex()
+            if popup.isVisible() and idx.isValid():
+                self.remove(idx.data())
+                return True
+        return False
+
+    def remove(self, name: str) -> None:
+        model = self.completer.model()
+        model.setStringList([n for n in model.stringList() if n != name])
+        self.delegate.hot_row = -1
+        self.on_hide(name)
+        if self.completer.completionCount():
+            self.completer.complete()  # refresh the list and its size
+        else:
+            self.completer.popup().hide()
 
 
 def _label(text: str) -> QLabel:
@@ -119,7 +225,8 @@ class EntryDialog(QDialog):
     def __init__(self, parent: QWidget | None, view: EntryView | None = None,
                  draft: EntryEdit | None = None, error: str = "",
                  groups: list[GroupView] | None = None, root_uuid: str = "",
-                 default_group: str | None = None):
+                 default_group: str | None = None, usernames: list[str] | None = None,
+                 hide_username=None):
         super().__init__(parent)
         self._uuid = draft.uuid if draft else (view.uuid if view else None)
         editing = self._uuid is not None
@@ -198,6 +305,17 @@ class EntryDialog(QDialog):
 
         self.username = QLineEdit()
         self.username.setPlaceholderText("Username or email")
+        if usernames:
+            # Like Outlook's address box: start typing and earlier usernames/emails are offered.
+            comp = QCompleter(usernames, self.username)
+            comp.setCaseSensitivity(Qt.CaseInsensitive)
+            comp.setFilterMode(Qt.MatchContains)
+            comp.setModelSorting(QCompleter.UnsortedModel)  # keep most-used first
+            comp.setMaxVisibleItems(8)
+            comp.popup().setObjectName("Suggestions")
+            self.username.setCompleter(comp)
+            if hide_username is not None:
+                self._suggestions = _SuggestionRemover(comp, hide_username)
         self.sec_username = _Section("Username", self.username)
         root.addWidget(self.sec_username)
 

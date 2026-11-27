@@ -17,20 +17,21 @@ class PinView(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setContentsMargins(32, 24, 32, 24)
         outer.addStretch(2)
 
         card = QWidget()
-        card.setObjectName("Card")
+        card.setObjectName("LockPanel")  # no box: the window itself is the panel
         card.setAttribute(Qt.WA_StyledBackground)
-        card.setFixedWidth(340)
+        card.setMinimumWidth(290)
+        card.setMaximumWidth(340)
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(28, 28, 28, 22)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
         logo = QLabel()
-        logo.setPixmap(icons.logo_pixmap(96))
-        logo.setFixedSize(48, 48)
+        logo.setPixmap(icons.logo_pixmap(128))
+        logo.setFixedSize(64, 64)
         logo.setScaledContents(True)
         lay.addWidget(logo, 0, Qt.AlignHCenter)
         head = QLabel("Locked")
@@ -62,7 +63,7 @@ class PinView(QWidget):
 
         self.unlock_btn = QPushButton("Unlock")
         self.unlock_btn.setObjectName("Primary")
-        self.unlock_btn.setFixedHeight(38)
+        self.unlock_btn.setFixedHeight(40)
         self.unlock_btn.setCursor(Qt.PointingHandCursor)
         self.unlock_btn.clicked.connect(self._submit)
         lay.addWidget(self.unlock_btn)
