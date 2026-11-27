@@ -5,6 +5,7 @@ Made-up data only. Pipe names are private to this test run (tests/conftest.py).
 from __future__ import annotations
 
 import contextlib
+import os
 import io
 import json
 import threading
@@ -141,7 +142,11 @@ def test_deny_timeout_and_allow_once(agent):
     req = ask.asked[-1]
     assert req.title == "AWS Console" and req.field == "otp" and req.folder == "Work"
     assert "python" in req.client.lower() and "PID" in req.client  # the calling program, from the pipe
-    assert "started by python" in req.client.lower(), req.client  # its parent: this pytest run
+    # its parent: whatever started this pytest run (python.exe via a venv locally, pwsh.exe on CI)
+    import ctypes
+    from vaultline.agent_access import _parent_name
+    parent = _parent_name(ctypes.WinDLL("kernel32", use_last_error=True), os.getpid())
+    assert parent and req.client.endswith(f", started by {parent}"), req.client
 
     log = log_text(a)
     for s in SECRETS + ("admin", r["out"]):
