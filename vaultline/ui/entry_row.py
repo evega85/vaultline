@@ -1,10 +1,11 @@
-"""One row of the entry list: avatar, title/username, and copy buttons."""
+"""One row of the entry list: avatar, title/username, copy buttons and Fill."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
+from .. import icons, theme
 from ..vault import EntryView
 from .widgets import Avatar, ElidedLabel, OtpButton
 
@@ -14,6 +15,7 @@ COMPACT_ROW_HEIGHT = 48
 
 class EntryRow(QWidget):
     copy_requested = Signal(str)   # "username" | "password" | "otp"
+    fill_requested = Signal()      # type this entry into the window you came from
 
     def __init__(self, view: EntryView, pixmap: QPixmap | None = None, parent: QWidget | None = None):
         super().__init__(parent)
@@ -35,6 +37,8 @@ class EntryRow(QWidget):
         if card:
             label = view.card_brand or "Card"
             parts = [f"{label} •••• {view.card_last4}" if view.card_last4 else label]
+        elif view.is_identity:
+            parts = ["Profile"]
         else:
             parts = [view.username] if view.username else []
         if view.group:
@@ -85,7 +89,37 @@ class EntryRow(QWidget):
             self.third.setFixedSize(98, 26)  # keeps the User/Pass columns aligned
         lay.addWidget(self.third)
 
+        if card:
+            self.fill_btn = None
+            spacer = QWidget()
+            spacer.setFixedSize(34, 26)
+            lay.addWidget(spacer)
+        else:
+            b = self.fill_btn = QPushButton()
+            b.setObjectName("Chip")
+            b.setIcon(icons.glyph(icons.FILL, theme.TEXT, 16))
+            b.setIconSize(QSize(16, 16))
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedSize(34, 26)
+            b.setEnabled(view.autotype.enabled)
+            b.clicked.connect(self.fill_requested)
+            self.set_fill_target("")
+            lay.addWidget(b)
+
         self.setFixedHeight(ROW_HEIGHT)
+
+    def set_fill_target(self, title: str) -> None:
+        """Tooltip naming the window Fill types into (a page title: never shown as HTML)."""
+        if self.fill_btn is None:
+            return
+        if not self.view.autotype.enabled:
+            tip = "Auto-Type is turned off for this entry"
+        elif title:
+            tip = ("Fill into “%s” (Ctrl+Shift+V)" % title).replace("<", "‹").replace(">", "›")
+        else:
+            tip = "Fill: click into a login box in another window first, then come back and press this"
+        self.fill_btn.setToolTip(tip)
 
     def set_compact(self, on: bool) -> None:
         """Compact window: shorter rows, smaller icon; all the copy buttons stay."""

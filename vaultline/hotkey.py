@@ -1,4 +1,4 @@
-"""Global shortcut (off by default): opens the quick search from any program.
+"""Global shortcuts (both off by default): the quick search, and Auto-Type (fill the window in front).
 
 Uses Windows' RegisterHotKey on the main window, so WM_HOTKEY arrives in its nativeEvent even
 while it's hidden in the tray. Windows refuses a shortcut another program already holds; the
@@ -13,7 +13,11 @@ from PySide6.QtGui import QKeySequence
 
 WM_HOTKEY = 0x0312
 HOTKEY_ID = 0x5641  # any id 0..0xBFFF, private to our window
+AUTOTYPE_ID = 0x5642
+NEWLOGIN_ID = 0x5643
 DEFAULT = "Ctrl+Alt+Space"
+AUTOTYPE_DEFAULT = "Ctrl+Alt+A"  # KeePass's and KeePassXC's
+NEWLOGIN_DEFAULT = "Ctrl+Alt+N"
 
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 
@@ -53,19 +57,25 @@ def parse(text: str) -> tuple[int, int] | None:
     return winmods, vk
 
 
-def register(hwnd: int, text: str) -> bool:
+def same(a: str, b: str) -> bool:
+    """True when two shortcut texts are the same keys."""
+    pa, pb = parse(a), parse(b)
+    return pa is not None and pa == pb
+
+
+def register(hwnd: int, text: str, hotkey_id: int = HOTKEY_ID) -> bool:
     """(Re)register the shortcut on `hwnd`. False if it's invalid or another program holds it."""
-    unregister(hwnd)
+    unregister(hwnd, hotkey_id)
     parsed = parse(text)
     if parsed is None or sys.platform != "win32" or not hwnd:
         return False
     import ctypes
     mods, vk = parsed
-    return bool(ctypes.windll.user32.RegisterHotKey(ctypes.c_void_p(hwnd), HOTKEY_ID,
+    return bool(ctypes.windll.user32.RegisterHotKey(ctypes.c_void_p(hwnd), hotkey_id,
                                                     mods | MOD_NOREPEAT, vk))
 
 
-def unregister(hwnd: int) -> None:
+def unregister(hwnd: int, hotkey_id: int = HOTKEY_ID) -> None:
     if sys.platform == "win32" and hwnd:
         import ctypes
-        ctypes.windll.user32.UnregisterHotKey(ctypes.c_void_p(hwnd), HOTKEY_ID)
+        ctypes.windll.user32.UnregisterHotKey(ctypes.c_void_p(hwnd), hotkey_id)

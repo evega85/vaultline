@@ -55,6 +55,11 @@ def shot(widget, name):
 
 @pytest.fixture
 def setup(app, tmp_path, monkeypatch):
+    # the window you came from: none, whatever is in front on this PC (tests that need one set it)
+    from vaultline import sendkeys
+    monkeypatch.setattr(sendkeys.ForegroundWatcher, "target", lambda self: 0)
+    from vaultline.ui import autotype_flow
+    monkeypatch.setattr(autotype_flow, "DIAG_LOG", tmp_path / "autotype.log")  # never the real data folder
     monkeypatch.setattr(cfgmod, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfgmod, "CONFIG_DIR", tmp_path)
     db = tmp_path / "vault.kdbx"
@@ -81,6 +86,21 @@ def setup(app, tmp_path, monkeypatch):
     vc.shutdown()
     win.close()
     clip.wipe()
+
+
+def edit_with(monkeypatch, fn):
+    """Drive the entry form when it opens inside the window: fn(form) fills it in and may press Save
+    (form._accept()); otherwise the form is closed with fn's return value, like the old dialog's exec."""
+    from vaultline.ui import main_window
+    orig = main_window.MainWindow.__dict__.get("_real_show_editor") or main_window.MainWindow._show_editor
+    monkeypatch.setattr(main_window.MainWindow, "_real_show_editor", orig, raising=False)
+
+    def show(win, dlg):
+        orig(win, dlg)
+        result = fn(dlg)
+        if win._dialog is dlg:
+            dlg.done(result or 0)
+    monkeypatch.setattr(main_window.MainWindow, "_show_editor", show)
 
 
 def unlock(app, win, vc, pw=PW):
@@ -185,7 +205,7 @@ def test_add_dialog_saves(setup, monkeypatch):
         dlg._accept()
         return dlg.result()
 
-    monkeypatch.setattr(entry_dialog.EntryDialog, "exec", fake_exec)
+    edit_with(monkeypatch, fake_exec)
     QTest.keyClick(win.vault_view.search, Qt.Key_N, Qt.ControlModifier)
     assert wait_for(app, lambda: any(v.title == "Dropbox" for v in win.vault_view._views), 20)
     e = PyKeePass(str(db), password=PW).find_entries(title="Dropbox", first=True)
@@ -282,7 +302,7 @@ def test_card_template_and_double_click_edit(setup, monkeypatch):
         dlg._accept()
         return dlg.result()
 
-    monkeypatch.setattr(entry_dialog.EntryDialog, "exec", add_card)
+    edit_with(monkeypatch, add_card)
     QTest.keyClick(win.vault_view.search, Qt.Key_N, Qt.ControlModifier)
     assert wait_for(app, lambda: any(v.title == "Visa" for v in win.vault_view._views), 20)
     e = PyKeePass(str(db), password=PW).find_entries(title="Visa", first=True)
@@ -326,7 +346,7 @@ def test_card_template_and_double_click_edit(setup, monkeypatch):
                       rows=[r.key.text() for r in dlg._rows])
         return 0
 
-    monkeypatch.setattr(entry_dialog.EntryDialog, "exec", capture)
+    edit_with(monkeypatch, capture)
     _click_row(app, view, "Visa", double=True)
     assert opened == {"title": "Visa", "folder": "Cards", "code": "123", "card": True,
                       "exp": ("12", "29"), "rows": ["Branch"]}
@@ -736,7 +756,7 @@ def test_compact_lists_nothing_until_asked(setup, monkeypatch):
 
     opened = []
     from vaultline.ui.entry_dialog import EntryDialog
-    monkeypatch.setattr(EntryDialog, "exec", lambda dlg: opened.append(dlg.width()) or 0)
+    edit_with(monkeypatch, lambda dlg: opened.append(dlg.width()) or 0)
     view.add_btn.click()  # Add opens the form, sized for the compact window
     assert opened and opened[0] <= max(win.frameGeometry().width(), 360)
 
@@ -954,7 +974,7 @@ def test_username_suggestions(setup, monkeypatch):
         comp.popup().hide()
         return 0
 
-    monkeypatch.setattr(EntryDialog, "exec", typed)
+    edit_with(monkeypatch, typed)
     win.vault_view.add_btn.click()
     assert "someone@example.com" in seen
 
@@ -995,7 +1015,7 @@ def test_username_suggestion_hide_and_return(setup, monkeypatch):
         assert shown(dlg) == [] and not popup.isVisible()
         return 0
 
-    monkeypatch.setattr(EntryDialog, "exec", hide_with_x_and_delete)
+    edit_with(monkeypatch, hide_with_x_and_delete)
     win.vault_view.add_btn.click()
     cfg = win.config
     assert cfg.username_hidden("someone@example.com") and cfg.username_hidden("Family@Example.com")
@@ -1011,7 +1031,7 @@ def test_username_suggestion_hide_and_return(setup, monkeypatch):
         dlg._accept()
         return 1
 
-    monkeypatch.setattr(EntryDialog, "exec", reopen_and_save)
+    edit_with(monkeypatch, reopen_and_save)
     win.vault_view.add_btn.click()
     assert "someone@example.com" not in seen and "family@example.com" not in seen
     assert not cfg.username_hidden("family@example.com") and cfg.username_hidden("someone@example.com")
@@ -1093,3 +1113,120 @@ def test_autostart_command_points_at_exe(monkeypatch):
     assert autostart.command() == r'"C:\Apps\Vaultline\Vaultline.exe" --background'
     monkeypatch.setattr(autostart.sys, "frozen", False, raising=False)
     assert not autostart.supported() and not autostart.set_enabled(True)  # never from source
+
+
+def test_generated_password_is_copied(setup, monkeypatch):
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    from vaultline.ui.entry_dialog import EntryDialog
+    seen = {}
+
+    def generate(dlg):
+        dlg.show()
+        dlg._generate()
+        seen["pw"], seen["note"] = dlg.password.text(), dlg.pw_copied.isVisible() and dlg.pw_copied.text()
+        seen["clip"] = QGuiApplication.clipboard().text()
+        return 0
+
+    edit_with(monkeypatch, generate)
+    win.vault_view.add_btn.click()
+    assert len(seen["pw"]) == 20 and seen["clip"] == seen["pw"]
+    assert seen["note"] == f"Copied. The clipboard clears in {clip.clear_seconds} s."
+
+
+def test_editor_opens_inside_the_window_with_the_pin(setup):
+    app, win, vc, *_ = setup
+    unlock(app, win, vc)
+    from vaultline.ui.entry_dialog import EntryDialog
+    from vaultline.ui.main_window import _EditorBar
+    win.resize(600, 480)  # compact, where the pin matters most
+    app.processEvents()
+    win.vault_view.add_btn.click()
+    dlg = win._dialog
+    assert isinstance(dlg, EntryDialog) and win.stack.currentWidget() is dlg and not dlg.isWindow()
+    bar = win.titlebar._controls
+    assert isinstance(bar, _EditorBar)
+    was = win.config.compact_pinned
+    bar.pin.click()
+    assert win.config.compact_pinned != was and win.vault_view.pin_btn.isChecked() != was
+    assert bar.pin.toolTip() == win.vault_view.pin_btn.toolTip()
+    bar.pin.click()
+    QTest.keyClick(dlg.title, Qt.Key_Escape)  # Esc: back to the list, nothing saved
+    app.processEvents()
+    assert win._dialog is None and win.stack.currentWidget() is win.vault_view
+    win.vault_view.add_btn.click()
+    assert win.stack.currentWidget() is win._dialog
+    vc.lock()
+    app.processEvents()
+    assert win._dialog is None and win.stack.currentWidget() is not None
+    assert not any(isinstance(win.stack.widget(i), EntryDialog) for i in range(win.stack.count()))
+
+
+def test_editor_fits_the_compact_window(setup):
+    app, win, vc, *_ = setup
+    unlock(app, win, vc)
+    from PySide6.QtWidgets import QScrollArea
+    win.resize(600, 480)
+    app.processEvents()
+    for template in ("Login", "Card", "Identity", "API key", "Note"):
+        win.vault_view.add_btn.click()
+        dlg = win._dialog
+        dlg._apply_template(template)
+        app.processEvents()
+        scroll = dlg.findChild(QScrollArea)
+        assert scroll.widget().minimumSizeHint().width() <= scroll.viewport().width(), template
+        dlg.reject()
+        app.processEvents()
+
+
+def test_shared_folder_tinted_in_pickers(setup):
+    app, win, vc, *_ = setup
+    unlock(app, win, vc)
+    work = next(g for g in vc.snapshot.groups if g.name == "Work")
+    win.config.agent_share_enabled, win.config.agent_folder_uuid = True, work.uuid
+    win.vault_view.add_btn.click()
+    combo = win._dialog.folder
+    i = combo.findData(work.uuid)
+    assert combo.itemText(i).endswith("shared with agents") and combo.itemData(i, Qt.DecorationRole) is not None
+    assert "shared" not in combo.itemText(combo.findData(vc.snapshot.root_uuid))
+    combo.setCurrentIndex(i)
+    assert combo.property("shared") is True and "agents" in combo.toolTip()
+    combo.setCurrentIndex(0)
+    assert combo.property("shared") is False
+    win._dialog.reject()
+    app.processEvents()
+    assert win.shared_folders() == {work.uuid}
+    win.config.agent_share_enabled = False
+    assert win.shared_folders() == set()
+
+
+def test_recycle_bin_in_the_folder_list(setup, monkeypatch):
+    app, win, vc, *_ = setup
+    unlock(app, win, vc)
+    from vaultline.ui import folder_popup, small_dialogs
+    from vaultline.vault import DeleteEntries
+    view = win.vault_view
+    work = next(g for g in vc.snapshot.groups if g.name == "Work")
+    win.config.agent_share_enabled, win.config.agent_folder_uuid = True, work.uuid
+    netflix = next(v for v in vc.snapshot.entries if v.title == "Netflix")
+    vc.apply([DeleteEntries([netflix.uuid])])
+    assert wait_for(app, lambda: [v.title for v in vc.snapshot.binned] == ["Netflix"])
+    # the list: All entries, Recycle bin, the shared folder (a reminder), then the rest
+    shown = []
+    monkeypatch.setattr(folder_popup.FolderPopup, "popup_below", lambda self, w: shown.append(self))
+    view._folder_menu()
+    pop = shown[0]
+    ids = [pop.list.item(i).data(Qt.UserRole) for i in range(pop.list.count())]
+    assert ids[:3] == [None, folder_popup.BIN, work.uuid]
+    pop.selected.emit(folder_popup.BIN)
+    assert view.in_bin and [v.title for v in view._views] == ["Netflix"]
+    assert all(v.title != "Netflix" for v in view.views)  # Auto-Type never sees the bin
+    view.open_details(view._views[0])
+    assert view.panel.restore_btn.isVisibleTo(view.panel) and not view.panel.edit_btn.isVisibleTo(view.panel)
+    win.delete_entry(view._views[0])  # Delete does nothing in the bin
+    monkeypatch.setattr(small_dialogs, "ask_folder", lambda *a, **k: vc.snapshot.root_uuid)
+    view.panel.restore_btn.click()
+    assert wait_for(app, lambda: any(v.title == "Netflix" for v in vc.snapshot.entries))
+    assert view.in_bin and view._views == []  # still showing the (now empty) bin
+    view._folder_picked(None)
+    assert not view.in_bin and any(v.title == "Netflix" for v in view._views)

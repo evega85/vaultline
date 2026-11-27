@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (QButtonGroup, QComboBox, QCompleter, QDialog, QFr
                                QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QToolButton,
                                QVBoxLayout, QWidget)
 
-from .. import icons, otp as otplib, passgen, theme
+from .. import icons, identity as idlib, otp as otplib, passgen, theme
+from .widgets import mark_shared_folders
 from ..vault import (CARD_BRAND_KEY, CARD_CODE_KEY, CARD_LOCAL_PHONE_KEY, CARD_PHONE_KEY, CARD_HOLDER_KEY, CARD_MONTH_KEY, CARD_NUMBER_KEY,
                       CARD_SLOT_KEYS, CARD_YEAR_KEY, LEGACY_CODE_KEY, LEGACY_EXPIRY_KEY, CustomField,
                       EntryEdit, EntryView, GroupView, expiry_from_parts, is_internal_field, parse_expiry)
@@ -19,6 +20,8 @@ TEMPLATES = {
     "Login": ([], set(), {}),
     # Cards: number in the username slot, a password, and the card code where TOTP would be.
     "Card": ([], {"otp", "username"}, {"url": "Website (login page)"}),
+    # Sign-up profile: identity_* fields (see identity.py), filled one box at a time.
+    "Identity": ([], {"otp", "username", "password", "url"}, {}),
     "API key": ([], {"otp"}, {"username": "Key ID / Client ID", "password": "Secret / API key",
                               "url": "Endpoint or dashboard URL"}),
     "Note": ([], {"username", "password", "url", "otp"}, {}),
@@ -45,6 +48,11 @@ def card_fields(number: str, code: str, exp: tuple[str, str] | None, year4: bool
     if local_phone:
         out.append(CustomField(CARD_LOCAL_PHONE_KEY, local_phone, False))
     return out
+
+
+def identity_fields(values: dict[str, str]) -> list[CustomField]:
+    """Profile values as custom fields, in a fixed order; empty ones are left out."""
+    return [CustomField(k, values[k], k in idlib.PROTECTED) for k in idlib.KEYS if values.get(k, "").strip()]
 
 
 def known_usernames(views) -> list[str]:
@@ -226,7 +234,7 @@ class EntryDialog(QDialog):
                  draft: EntryEdit | None = None, error: str = "",
                  groups: list[GroupView] | None = None, root_uuid: str = "",
                  default_group: str | None = None, usernames: list[str] | None = None,
-                 hide_username=None):
+                 hide_username=None, copy_secret=None, shared: set[str] | None = None):
         super().__init__(parent)
         self._uuid = draft.uuid if draft else (view.uuid if view else None)
         editing = self._uuid is not None
@@ -237,6 +245,7 @@ class EntryDialog(QDialog):
         self.setMinimumWidth(520)
         self.result_edit: EntryEdit | None = None
         self._original: EntryEdit | None = None
+        self._copy_secret = copy_secret  # copies with auto-clear; returns the seconds until it clears
         self._rows: list[_CustomRow] = []
 
         outer = QVBoxLayout(self)
@@ -288,6 +297,7 @@ class EntryDialog(QDialog):
         for g in self._groups:
             self.folder.addItem(("      " * g.depth) + g.name, g.uuid)
         self.folder.addItem("＋ New folder…", NEW_FOLDER)
+        mark_shared_folders(self.folder, shared or set())
         self.new_folder = QLineEdit()
         self.new_folder.setPlaceholderText("Folder name (use / for a subfolder, e.g. Work/Clients)")
         self.new_folder.hide()
@@ -330,12 +340,18 @@ class EntryDialog(QDialog):
         self._eye = _small_tool(icons.EYE, "Show / hide")
         self._eye.setCheckable(True)
         self._eye.toggled.connect(self._toggle_pw)
-        gen = _small_tool(icons.DICE, "Generate a strong password")
+        gen = _small_tool(icons.DICE, "Generate a strong password (and copy it)" if copy_secret
+                          else "Generate a strong password")
         gen.clicked.connect(self._generate)
         pw_row.addWidget(self.password, 1)
         pw_row.addWidget(self._eye)
         pw_row.addWidget(gen)
-        self.sec_password = _Section("Password", pw_wrap)
+        self.pw_copied = QLabel()
+        self.pw_copied.setObjectName("Hint")
+        self.pw_copied.setWordWrap(True)
+        self.pw_copied.hide()
+        self._pw_copied_timer = QTimer(self, singleShot=True, interval=4000, timeout=self.pw_copied.hide)
+        self.sec_password = _Section("Password", pw_wrap, self.pw_copied)
         root.addWidget(self.sec_password)
 
         self.url = QLineEdit()
@@ -361,6 +377,7 @@ class EntryDialog(QDialog):
         self.otp.setPlaceholderText("Base32 secret or otpauth://totp/… URI (optional)")
         self.otp_hint = QLabel()
         self.otp_hint.setObjectName("Hint")
+        self.otp_hint.setWordWrap(True)  # the form also opens inside the narrow (compact) window
         self.otp.textChanged.connect(self._check_otp)
         self.sec_otp = _Section("TOTP secret", self.otp, self.otp_hint)
         root.addWidget(self.sec_otp)
@@ -423,7 +440,52 @@ class EntryDialog(QDialog):
         self.sec_holder.hide()
         root.addWidget(self.sec_holder)
         self._card = False
-        self._year4 = True  # write card_expYear as 2029 (as Bitwarden does) unless it was "29"
+        self._year4 = True
+
+        # sign-up profile: one box per field, typed one at a time by Fill
+        self.id_boxes: dict[str, QLineEdit] = {}
+        self.sec_identity = QWidget()
+        id_lay = QVBoxLayout(self.sec_identity)
+        id_lay.setContentsMargins(0, 0, 0, 0)
+        id_lay.setSpacing(14)
+        placeholders = {idlib.EMAIL: "name@example.com", idlib.PHONE: "416-555-0123",
+                        idlib.BIRTH: "YYYY-MM-DD", idlib.GENDER: "e.g. Male", idlib.STATE: "ON",
+                        idlib.POSTAL: "A1A 1A1",
+                        idlib.COUNTRY: "Canada"}
+        for key in idlib.KEYS:
+            box = QLineEdit()
+            box.setPlaceholderText(placeholders.get(key, ""))
+            self.id_boxes[key] = box
+        birth = self.id_boxes[idlib.BIRTH]
+        birth.setObjectName("Mono")
+        birth.setEchoMode(QLineEdit.Password)
+        birth_wrap = QWidget()
+        birth_row = QHBoxLayout(birth_wrap)
+        birth_row.setContentsMargins(0, 0, 0, 0)
+        birth_row.setSpacing(6)
+        birth_eye = _small_tool(icons.EYE, "Show / hide")
+        birth_eye.setCheckable(True)
+        birth_eye.toggled.connect(lambda on: birth.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
+        birth_row.addWidget(birth, 1)
+        birth_row.addWidget(birth_eye)
+        for keys in ((idlib.FIRST, idlib.LAST), (idlib.EMAIL,), (idlib.PHONE,), (idlib.BIRTH, idlib.GENDER),
+                     (idlib.ADDRESS,),
+                     (idlib.CITY, idlib.STATE), (idlib.POSTAL, idlib.COUNTRY)):
+            line = QHBoxLayout()
+            line.setSpacing(16)
+            for key in keys:
+                widget = birth_wrap if key == idlib.BIRTH else self.id_boxes[key]
+                line.addWidget(_Section(idlib.LABELS[key], widget), 1)
+            id_lay.addLayout(line)
+        self.id_hint = QLabel("The name and address were split up from the imported fields. "
+                              "Check them before you save.")
+        self.id_hint.setObjectName("Hint")
+        self.id_hint.setWordWrap(True)
+        self.id_hint.hide()
+        id_lay.addWidget(self.id_hint)
+        self.sec_identity.hide()
+        root.addWidget(self.sec_identity)
+        self._identity = False  # write card_expYear as 2029 (as Bitwarden does) unless it was "29"
 
         # custom fields
         custom_w = QWidget()
@@ -484,9 +546,20 @@ class EntryDialog(QDialog):
             self.otp.setText(src.otp if src.otp is not None else (view.otp_text if view else ""))
             is_card = src.card
             values = {f.key: f.value for f in (src.custom or ())}
+            is_identity = not is_card and any(idlib.is_identity_key(k) for k in values)
+            split = self._split_imported(values) if is_identity else {}
             for f in (src.custom or ()):
-                if not (is_card and f.key in CARD_SLOT_KEYS):
-                    self.add_custom_row(f.key, f.value, f.protected)
+                if is_card and f.key in CARD_SLOT_KEYS:
+                    continue
+                if is_identity and (f.key in idlib.KEYS or f.key in split.get("_drop", ())):
+                    continue
+                self.add_custom_row(f.key, f.value, f.protected)
+            if is_identity:
+                for key, box in self.id_boxes.items():
+                    box.setText(split.get(key) or values.get(key, ""))
+                self.id_hint.setVisible(bool(split.get("_drop")))
+                self._set_identity_mode(True, keep={"username": bool(src.username), "password": bool(src.password),
+                                                    "url": bool(src.url), "otp": bool(view and view.otp_text)})
             if is_card:
                 self.card_number.setText(values.get(CARD_NUMBER_KEY, ""))
                 self.card_code.setText(values.get(CARD_CODE_KEY, ""))
@@ -534,9 +607,39 @@ class EntryDialog(QDialog):
                 username = ""  # older layout: the number lived in the username
             card = card_fields(view.card_number, view.card_code, view.card_expiry, len(year.strip()) != 2,
                                view.card_holder, view.card_brand, view.card_phone, view.card_local_phone)
-        custom = [f for f in view.custom if f.key not in hidden] + card
+        ident = []
+        if view.is_identity:
+            hidden |= set(idlib.KEYS)
+            ident = identity_fields({k: view.get_field(k) for k in idlib.KEYS})
+        custom = [f for f in view.custom if f.key not in hidden] + card + ident
         return EntryEdit(view.uuid, view.title, username, view.password, view.url, view.notes,
                          view.otp_text, view.group_uuid, "", custom, card=view.is_card)
+
+    @staticmethod
+    def _split_imported(values: dict[str, str]) -> dict:
+        """KeePassXC's joined identity_name / identity_address, split into the profile's boxes when those
+        are empty. "_drop" lists the imported keys that the split replaces."""
+        out: dict = {"_drop": []}
+        name = values.get(idlib.IMPORTED_NAME, "")
+        if name.strip() and not (values.get(idlib.FIRST, "").strip() or values.get(idlib.LAST, "").strip()):
+            out[idlib.FIRST], out[idlib.LAST] = idlib.split_name(name)
+            out["_drop"].append(idlib.IMPORTED_NAME)
+        addr = values.get(idlib.IMPORTED_ADDRESS, "")
+        parts = (idlib.ADDRESS, idlib.CITY, idlib.STATE, idlib.POSTAL, idlib.COUNTRY)
+        if addr.strip() and not any(values.get(k, "").strip() for k in parts):
+            out.update(idlib.split_address(addr))
+            out["_drop"].append(idlib.IMPORTED_ADDRESS)
+        return out
+
+    def _set_identity_mode(self, on: bool, keep: dict | None = None) -> None:
+        """Profile form. `keep`: standard boxes left showing because the entry already uses them."""
+        self._identity = on
+        self.sec_identity.setVisible(on)
+        if on:
+            keep = keep or {}
+            for k, sec in (("username", self.sec_username), ("password", self.sec_password),
+                           ("url", self.sec_url), ("otp", self.sec_otp)):
+                sec.setVisible(bool(keep.get(k)))
 
     def _set_card_mode(self, on: bool) -> None:
         self._card = on
@@ -579,6 +682,7 @@ class EntryDialog(QDialog):
             if k in defaults:
                 sec.label.setText(relabel.get(k, defaults[k]))
         self._set_card_mode(name == "Card")
+        self._set_identity_mode(name == "Identity")
 
     # ---- helpers ------------------------------------------------------------------
     def _folder_changed(self, _i: int) -> None:
@@ -594,6 +698,11 @@ class EntryDialog(QDialog):
     def _generate(self) -> None:
         self.password.setText(passgen.generate(20))
         self._eye.setChecked(True)
+        if self._copy_secret is not None:  # ready to paste into the site's "new password" box
+            seconds = self._copy_secret(self.password.text())
+            self.pw_copied.setText(f"Copied. The clipboard clears in {seconds} s.")
+            self.pw_copied.show()
+            self._pw_copied_timer.start()
 
     def _check_otp(self) -> bool:
         text = self.otp.text().strip()
@@ -638,7 +747,8 @@ class EntryDialog(QDialog):
                 continue
             if not f.key:
                 return self._fail("Every custom field needs a name.", row.key)
-            if is_internal_field(f.key) or (self._card and f.key in CARD_SLOT_KEYS):
+            if is_internal_field(f.key) or (self._card and f.key in CARD_SLOT_KEYS) or \
+                    (self._identity and f.key in idlib.KEYS):
                 return self._fail(f"“{f.key}” is a reserved field name. Pick another.", row.key)
             if f.key in seen:
                 return self._fail(f"There are two fields named “{f.key}”.", row.key)
@@ -664,6 +774,19 @@ class EntryDialog(QDialog):
             custom += card_fields(self.card_number.text().strip(), self.card_code.text().strip(), exp,
                                   self._year4, self.card_holder.text().strip(), self.card_brand.text().strip(),
                                   self.card_phone.text().strip(), self.card_local_phone.text().strip())
+
+        if self._identity:
+            values = {k: box.text().strip() for k, box in self.id_boxes.items()}
+            birth = values[idlib.BIRTH]
+            if birth:
+                d = idlib.parse_birth_date(birth)
+                if d is None:
+                    return self._fail("Write the date of birth as YYYY-MM-DD, e.g. 1990-01-31.",
+                                      self.id_boxes[idlib.BIRTH])
+                values[idlib.BIRTH] = idlib.format_date(d, "iso")
+            if not any(values.values()):
+                return self._fail("Fill in at least one profile field.", self.id_boxes[idlib.FIRST])
+            custom += identity_fields(values)
 
         otp_text = self.otp.text().strip()
         if self._card or (self._original and otp_text == (self._original.otp or "").strip()):

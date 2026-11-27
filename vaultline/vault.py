@@ -36,7 +36,8 @@ from lxml import etree
 from pykeepass import PyKeePass
 from pykeepass.exceptions import CredentialsError, HeaderChecksumError, PayloadChecksumError
 
-from . import otp as otplib
+from . import identity as idlib, otp as otplib
+from .autotype import AutoTypeInfo
 
 STANDARD_FIELDS = ("Title", "UserName", "Password", "URL", "Notes")
 
@@ -210,6 +211,7 @@ class EntryView:
     totp: pyotp.TOTP | None = field(default=None, repr=False)
     password_alias: str = ""  # custom field standing in for an empty Password (Bitwarden import)
     references: tuple[str, ...] = ()  # "username"/"password" when stored as a {REF:...} to another entry
+    autotype: AutoTypeInfo = field(default_factory=AutoTypeInfo)  # read from the kdbx, never written
 
     def get_field(self, key: str) -> str:
         return next((f.value for f in self.custom if f.key == key), "")
@@ -255,6 +257,11 @@ class EntryView:
     @property
     def card_local_phone(self) -> str:
         return self.get_field(CARD_LOCAL_PHONE_KEY)
+
+    @property
+    def is_identity(self) -> bool:
+        """A sign-up profile: any identity_* field (KeePassXC's Bitwarden import adds no tag either)."""
+        return not self.is_card and any(idlib.is_identity_key(f.key) for f in self.custom)
 
     @property
     def card_last4(self) -> str:
@@ -332,6 +339,7 @@ class Snapshot:
     groups: list[GroupView]          # excludes the root and the recycle bin
     icons: dict[str, bytes]          # icon uuid -> image bytes (usually PNG)
     root_uuid: str
+    binned: list = field(default_factory=list)  # EntryViews in the recycle bin (for restoring), not listed
 
 
 # ---- changes ------------------------------------------------------------------
@@ -559,14 +567,13 @@ class Vault:
                                         parent.uuid.hex if parent is not None else ""))
         groups.sort(key=lambda gv: tuple(p.casefold() for p in gv.path))
 
-        views = []
+        views, binned = [], []
         for e in kp.entries:
             path, in_bin = path_of(e.group)
-            if in_bin:
-                continue
-            views.append(self._entry_view(e, path))
+            (binned if in_bin else views).append(self._entry_view(e, path))
         views.sort(key=lambda v: (v.title.casefold(), v.username.casefold()))
-        return Snapshot(views, groups, self._custom_icons(), root.uuid.hex)
+        binned.sort(key=lambda v: v.modified or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return Snapshot(views, groups, self._custom_icons(), root.uuid.hex, binned)
 
     def _entry_view(self, e, path: tuple[str, ...]) -> EntryView:
         items = _string_items(e)
@@ -603,7 +610,40 @@ class Vault:
             created=e.ctime,
             modified=e.mtime,
             totp=otplib.from_fields(fields),
+            autotype=self._autotype_info(e),
         )
+
+    @staticmethod
+    def _autotype_info(e) -> AutoTypeInfo:
+        """The entry's Auto-Type settings as KeePass applies them: the entry's flag and its folders'
+        EnableAutoType (empty = ask the parent), the entry's sequence or the nearest folder's
+        DefaultAutoTypeSequence, and the window associations. Read only: nothing here is written."""
+        el = e._element.find("AutoType")
+        enabled, sequence, assocs = True, "", []
+        if el is not None:
+            enabled = (el.findtext("Enabled") or "True").strip().lower() != "false"
+            sequence = (el.findtext("DefaultSequence") or "").strip()
+            for a in el.findall("Association"):
+                window = (a.findtext("Window") or "").strip()
+                if window:
+                    assocs.append((window, (a.findtext("KeystrokeSequence") or "").strip()))
+        group_flag = None
+        g = e.group
+        while g is not None:
+            ge = g._element
+            if group_flag is None:
+                flag = (ge.findtext("EnableAutoType") or "").strip().lower()
+                if flag in ("true", "false"):
+                    group_flag = flag == "true"
+            if not sequence:
+                sequence = (ge.findtext("DefaultAutoTypeSequence") or "").strip()
+            g = g.parentgroup
+        try:
+            expired = bool(e.expires and e.expired)
+        except Exception:
+            expired = False
+        return AutoTypeInfo(enabled=enabled and group_flag is not False, sequence=sequence,
+                            associations=tuple(assocs), expired=expired)
 
     @staticmethod
     def _deref(entry, attr: str, raw: str) -> str:

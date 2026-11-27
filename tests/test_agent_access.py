@@ -416,3 +416,36 @@ def test_folder_pass_prompt_button(agent):
     dlg2 = AgentPrompt(req, got.append)
     assert not dlg2.folder.isVisibleTo(dlg2)
     dlg2.close()
+
+
+def test_cli_bin_and_restore(agent):
+    a = agent
+    run, ids = a["run"], a["ids"]
+    r = run("delete", ids["Netflix"][:8])
+    assert r["code"] == 0
+    r = run("--json", "bin")
+    binned = json.loads(r["out"])
+    assert [e["title"] for e in binned] == ["Netflix"] and "n-pass" not in r["out"]  # no secrets
+    a["share"]()  # never straight into the folder shared with agents
+    r = run("restore", ids["Netflix"][:8], "--to", "Work")
+    assert r["code"] == 1 and "shared with agents" in r["err"]
+    r = run("restore", ids["Netflix"][:8])
+    assert r["code"] == 0 and "restored Netflix" in r["out"]
+    assert wait_for(a["app"], lambda: any(v.title == "Netflix" for v in a["vc"].snapshot.entries))
+    assert run("restore", "zzzzzz12")["code"] == 1
+
+
+def test_cli_compare_says_same_or_different_only(agent):
+    a = agent
+    run, ids, vc = a["run"], a["ids"], a["vc"]
+    from vaultline.vault import EntryEdit
+    vc.save(EntryEdit(None, "Netflix copy", "family@example.com", "n-pass", "", "", None))
+    assert wait_for(a["app"], lambda: any(v.title == "Netflix copy" for v in vc.snapshot.entries))
+    copy = next(v.uuid for v in vc.snapshot.entries if v.title == "Netflix copy")
+    r = run("--json", "compare", ids["Netflix"][:8], copy[:8])
+    out = json.loads(r["out"])
+    assert out["same"]["password"] and out["same"]["username"] and not out["same"]["title"]
+    assert "n-pass" not in r["out"] and "family@example.com" not in r["out"]  # never a value
+    r = run("--json", "compare", ids["Netflix"][:8], ids["GitHub"][:8])
+    out = json.loads(r["out"])
+    assert not out["same"]["password"] and not out["identical"] and "gh-pass" not in r["out"]

@@ -112,6 +112,24 @@ def ask_text(parent: QWidget, title: str, label: str, value: str = "", placehold
     return edit.text().strip() if d.exec() == QDialog.Accepted else None
 
 
+def ask_folder(parent: QWidget, title: str, text: str, groups, root_uuid: str,
+               shared: set[str] | None = None, ok_text: str = "OK") -> str | None:
+    """Pick a folder (or the top level). Returns its uuid, or None if cancelled."""
+    from PySide6.QtWidgets import QComboBox
+    from .widgets import mark_shared_folders
+    d = _Base(parent, title, text)
+    box = QComboBox()
+    box.addItem("Top level", root_uuid)
+    for g in groups:
+        box.addItem(("      " * g.depth) + g.name, g.uuid)
+    mark_shared_folders(box, shared or set())
+    d.body.addWidget(box)
+    ok = d.buttons(ok_text)
+    ok.clicked.connect(d.accept)
+    box.setFocus()
+    return box.currentData() if d.exec() == QDialog.Accepted else None
+
+
 def _field(d: _Base, label: str, password: bool = True, digits: bool = False) -> QLineEdit:
     lab = QLabel(label)
     lab.setObjectName("FieldLabel")

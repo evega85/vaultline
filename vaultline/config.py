@@ -50,6 +50,14 @@ class Config:
     icon_pos: list = field(default_factory=list)  # [x, y] of the icon, Qt screen coordinates
     hotkey_enabled: bool = False      # a global shortcut opens the search from any program
     hotkey: str = "Ctrl+Alt+Space"
+    autotype_hotkey_enabled: bool = False  # a global shortcut types the matching login into the window in front
+    autotype_hotkey: str = "Ctrl+Alt+A"
+    autotype_suggest: bool = True  # quick box lists the logins for the window you came from
+    newlogin_hotkey_enabled: bool = False  # a global shortcut makes a new login for the window in front
+    newlogin_hotkey: str = "Ctrl+Alt+N"
+    default_profile_uuid: str = ""   # sign-up profile whose email new logins use (hex UUID)
+    newlogin_folder_uuid: str = ""   # folder new logins go in ("" = top level)
+    newlogin_length: int = 20        # generated password length for new logins
     recent_databases: list = field(default_factory=list)  # [{"path", "keyfile"}], newest first
     close_action: str = "ask"         # the window's X: "ask", "tray" (keep running) or "quit"
     hidden_usernames: list = field(default_factory=list)  # usernames X'd out of suggestions, salted hashes only

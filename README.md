@@ -15,6 +15,7 @@
 - **Safe with cloud sync.** If Google Drive, OneDrive or Dropbox updates the file (say, after you edit on your phone), Vaultline reloads it. When you save, changes made elsewhere are merged in, not overwritten.
 - **Works alongside other KeePass apps.** It's the same standard `.kdbx` (KDBX 4) file you already use in KeePassXC and KeePassium. There's no import and no lock-in.
 - **Compact view.** Make the window narrow (or press **Ctrl+M**, or the button next to minimise) and it becomes a slim quick-search bar that grows with its results, sticks to the top of the screen, and can stay on top of other windows (📌).
+- **Auto-Type and Fill.** Press **Ctrl+Alt+A** (off by default, Settings → Auto-Type) in a login window or web page and Vaultline types the matching entry's username, Tab, password and Enter into it. Or find the entry in Vaultline and press its **Fill** button (the keyboard icon at the end of each row, or **Ctrl+Shift+V**) to type it into the window you came from. It uses the Auto-Type settings already in your `.kdbx` from KeePass or KeePassXC (on/off, custom sequence, window associations) and never changes them.
 - **Also:** folders, website icons, a password generator, PIN quick-unlock, auto-lock, quick switching between recent databases (Settings → Database), a tray icon, and a dark theme.
 
 > Vaultline is an independent project. It is not affiliated with or endorsed by KeePass, KeePassXC or KeePassium.
@@ -45,6 +46,7 @@ The first time you close the window, Vaultline asks whether to keep running in t
 | **Enter** or **Ctrl+C** | Copy password |
 | **Ctrl+B** | Copy username (or card number) |
 | **Ctrl+T** | Copy the current one-time code (or card code) |
+| **Ctrl+Shift+V** | Fill: type the username and password into the window you were in before Vaultline |
 | **Ctrl+I** or click a row | Show all fields of the entry |
 | **Ctrl+E** or double-click | Edit the entry |
 | **Ctrl+N** | New entry |
@@ -53,7 +55,19 @@ The first time you close the window, Vaultline asks whether to keep running in t
 | **F1** | Help: using the same vault in KeePassXC, KeePassium (iPhone) and KeePassDX (Android) |
 | **Esc** | Close details → clear search → leave folder (it never hides the window) |
 
-Right-click a row for more (copy URL, edit, delete).
+Right-click a row for more (copy URL, fill, edit, delete).
+
+**Global shortcuts** (both off by default, set in Settings): **Ctrl+Alt+Space** opens the search from any program, and **Ctrl+Alt+A** fills the login for the window in front.
+
+### Auto-Type in detail
+
+- **Matching**, in this order: the entry's KeePass window associations (`*` and `?` wildcards, `//regex//`), then the entry's title in the page or window title, then the website's name (`github` for `accounts.github.com`). The browser's own name at the end of a window title is ignored.
+- **Fill knows a password box.** If the box you clicked into hides what you type, Fill (and the shortcut) types just the password and Enter; otherwise the whole login. Vaultline asks Windows only what kind of box has the focus, never what's in it. If it can't tell, it types the whole login.
+- **One field at a time:** the keyboard icons beside the username, password and one-time code in the details panel type just that field (handy for a code asked on a second page).
+- **Suggestions:** open the quick search from a login page and the matching logins are already listed (Settings → Auto-Type, on by default). Nothing is typed until you press Fill.
+- **Only a window association types straight away.** A match on the title could come from any web page, so Vaultline shows it in a small list by the cursor to confirm with Enter. With no match, the list lets you search.
+- **Sequences** (KeePass syntax): `{USERNAME}` `{PASSWORD}` `{TAB}` `{ENTER}` `{TOTP}` `{DELAY 500}` (pause) `{DELAY=50}` (time between keys), plus `{TAB 3}`, `{SPACE}`, `{TITLE}`, `{URL}`, `{S:Field name}`, `~` (Enter) and the escapes `{{}` `{}}` `{+}` `{^}` `{%}` `{~}`. Default: `{USERNAME}{TAB}{PASSWORD}{ENTER}`. A sequence with anything else (such as KeePass's `^` `+` `%` key combinations) isn't typed at all, and you're told why.
+- **Safety:** it only types while Vaultline is fully unlocked (pressed while locked, it asks you to unlock and then carries on). It checks before every keystroke that the same window is still in front, and stops if not. It never types into Vaultline itself. Windows blocks typing into programs running as administrator, so Vaultline says so instead of typing.
 
 ---
 

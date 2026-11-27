@@ -8,14 +8,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
 from .. import APP_NAME, agent_access, hotkey, icons, otp as otplib, pin as pinlib, theme
 from ..clipboard import SecureClipboard
 from ..config import Config
 from ..controller import VaultController
-from ..vault import CreateFolder, DeleteEntries, DeleteFolder, EntryEdit, EntryView, RenameFolder, Snapshot
+from ..vault import (CreateFolder, DeleteEntries, DeleteFolder, EntryEdit, EntryView, MoveEntries, RenameFolder,
+                     Snapshot)
 from . import small_dialogs
+from .autotype_flow import AutoTypeFlow
 from .entry_dialog import EntryDialog, known_usernames
 from .floating_icon import ICON_SIZE, FloatingIcon, panel_position, screen_area
 from .frameless import NativeFrame, available as native_frame_available
@@ -54,10 +57,41 @@ _LABELS = {"username": "Username", "password": "Password", "otp": "OTP", "url": 
            "card_code": "Card code", "card_number": "Card number"}
 
 
+class _EditorBar(QWidget):
+    """Title bar while the entry form is open: its name and a pin that works like the list's."""
+
+    def __init__(self, title: str, pin_btn: QPushButton):
+        super().__init__()
+        self._source = pin_btn
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 0, 8, 0)
+        lay.setSpacing(8)
+        name = QLabel(title)
+        name.setStyleSheet("font-size: 13px; font-weight: 600;")
+        lay.addWidget(name)
+        lay.addStretch(1)
+        self.pin = QPushButton()
+        self.pin.setObjectName("Ghost")
+        self.pin.setIconSize(pin_btn.iconSize())
+        self.pin.setFixedSize(pin_btn.size() if pin_btn.width() > 0 else QSize(42, 42))
+        self.pin.setFocusPolicy(Qt.NoFocus)
+        self.pin.setCursor(Qt.PointingHandCursor)
+        self.pin.clicked.connect(pin_btn.click)  # the list's pin does the work (and keeps the setting)
+        pin_btn.toggled.connect(self.sync)
+        lay.addWidget(self.pin)
+        self.sync()
+
+    def sync(self, *_):
+        self.pin.setIcon(self._source.icon())
+        self.pin.setStyleSheet(self._source.styleSheet())
+        self.pin.setToolTip(self._source.toolTip())
+
+
 class MainWindow(QMainWindow):
     hidden_to_tray = Signal()
     settings_saved = Signal()
     quit_requested = Signal()  # the X with "Quit" chosen: the tray does the real quit
+    activated = Signal()       # came to the front (Fill shows the window it would type into)
 
     def __init__(self, config: Config, controller: VaultController, clipboard: SecureClipboard):
         super().__init__()
@@ -131,6 +165,7 @@ class MainWindow(QMainWindow):
         vv.folder_create_requested.connect(self.create_folder)
         vv.folder_rename_requested.connect(self.rename_folder)
         vv.folder_delete_requested.connect(self.delete_folder)
+        vv.restore_requested.connect(self.restore_entry)
         vv.pin_toggled.connect(self._pin_toggled_compact)
         vv.content_changed.connect(lambda: self._fit_height())
         vv.help_requested.connect(self.open_help)
@@ -154,6 +189,13 @@ class MainWindow(QMainWindow):
         for sig in (self.vc.unlocked, self.vc.locked, self.vc.pin_locked):
             sig.connect(lambda *_: self._update_icon_lock())
         self.settings_saved.connect(self.apply_hotkey)
+        self.settings_saved.connect(self._apply_suggest)
+        self._apply_suggest()
+        self.autotype = AutoTypeFlow(self)
+        vv.fill_requested.connect(self.autotype.fill)
+        vv.fill_field_requested.connect(self.autotype.fill)
+        vv.new_login_requested.connect(lambda: self.autotype.new_login())
+        vv.shared_folders = self.shared_folders
 
         self.vc.unlocked.connect(self._on_unlocked)
         self.vc.unlock_failed.connect(self._on_unlock_failed)
@@ -326,12 +368,19 @@ class MainWindow(QMainWindow):
             if msg.message == hotkey.WM_HOTKEY and msg.wParam == hotkey.HOTKEY_ID:
                 QTimer.singleShot(0, self.summon)
                 return True, 0
+            if msg.message == hotkey.WM_HOTKEY and msg.wParam == hotkey.AUTOTYPE_ID:
+                QTimer.singleShot(0, self.autotype.hotkey_pressed)
+            if msg.message == hotkey.WM_HOTKEY and msg.wParam == hotkey.NEWLOGIN_ID:
+                QTimer.singleShot(0, self.autotype.newlogin_hotkey_pressed)
+                return True, 0
         got = self.frame.handle(event_type, message)
         return got if got is not None else super().nativeEvent(event_type, message)
 
     def changeEvent(self, e) -> None:  # noqa: N802
         if e.type() == QEvent.WindowStateChange:
             self.titlebar.set_maximized(self.isMaximized())
+        elif e.type() == QEvent.ActivationChange and self.isActiveWindow():
+            self.activated.emit()
         elif e.type() == QEvent.ActivationChange and self.icon_mode and not self.isActiveWindow():
             QTimer.singleShot(COLLAPSE_DELAY, self._collapse_if_away)
         super().changeEvent(e)
@@ -492,18 +541,41 @@ class MainWindow(QMainWindow):
 
     # ---- global shortcut ----------------------------------------------------------------
     def apply_hotkey(self) -> None:
-        """Register (or drop) the global shortcut from Settings; hotkey_error says why it failed."""
-        self.hotkey_error = ""
-        if not self.config.hotkey_enabled:
-            if native_frame_available():
-                hotkey.unregister(int(self.winId()))
-            return
-        if hotkey.parse(self.config.hotkey) is None:
-            self.hotkey_error = f"{self.config.hotkey} can't be a shortcut: use Ctrl, Alt or Win with a key."
-        elif native_frame_available() and not hotkey.register(int(self.winId()), self.config.hotkey):
-            self.hotkey_error = f"{self.config.hotkey} is already used by another program. Pick another in Settings."
+        """Register (or drop) the global shortcuts from Settings (search, Auto-Type); hotkey_error says
+        why one failed."""
+        c = self.config
+        errors = []
+        for on, text, hid, what in ((c.hotkey_enabled, c.hotkey, hotkey.HOTKEY_ID, "search"),
+                                    (c.autotype_hotkey_enabled, c.autotype_hotkey, hotkey.AUTOTYPE_ID, "Auto-Type"),
+                                    (c.newlogin_hotkey_enabled, c.newlogin_hotkey, hotkey.NEWLOGIN_ID, "New login")):
+            if not on:
+                if native_frame_available():
+                    hotkey.unregister(int(self.winId()), hid)
+                continue
+            if hotkey.parse(text) is None:
+                errors.append(f"{text} can't be a shortcut: use Ctrl, Alt or Win with a key.")
+            elif hid != hotkey.HOTKEY_ID and (clash := self._shortcut_clash(hid, text)):
+                if native_frame_available():
+                    hotkey.unregister(int(self.winId()), hid)
+                errors.append(f"{text} is already the {clash} shortcut. Pick another for {what} in Settings.")
+            elif native_frame_available() and not hotkey.register(int(self.winId()), text, hid):
+                errors.append(f"{text} ({what}) is already used by another program. Pick another in Settings.")
+        self.hotkey_error = " ".join(errors)
         if self.hotkey_error:
             self.toast.show_message("Shortcut", self.hotkey_error, "error", 6000)
+
+    def shared_folders(self) -> set[str]:
+        """The folder shared with agents and its subfolders (tinted in folder pickers)."""
+        return agent_access.shared_ids_for(self.config, self.vc.snapshot)
+
+    def _shortcut_clash(self, hid: int, text: str) -> str:
+        """Which shortcut registered before this one already uses `text` ("" if none)."""
+        c = self.config
+        if c.hotkey_enabled and hotkey.same(text, c.hotkey):
+            return "search"
+        if hid == hotkey.NEWLOGIN_ID and c.autotype_hotkey_enabled and hotkey.same(text, c.autotype_hotkey):
+            return "Auto-Type"
+        return ""
 
     def summon(self) -> None:
         """The global shortcut: open the search (or put it away if it's already in front)."""
@@ -537,9 +609,15 @@ class MainWindow(QMainWindow):
         page.deleteLater()
 
     def _update_titlebar(self, _index: int = 0) -> None:
-        """The vault's search row lives in the title bar; other screens just show the app name."""
-        on_vault = self.stack.currentWidget() is self.vault_view
-        self.titlebar.set_controls(self.vault_view.top_bar if on_vault else None)
+        """The vault's search row lives in the title bar; the entry form shows its name and the pin;
+        other screens just show the app name."""
+        current = self.stack.currentWidget()
+        if current is self.vault_view:
+            self.titlebar.set_controls(self.vault_view.top_bar)
+        elif isinstance(current, EntryDialog):
+            self.titlebar.set_controls(_EditorBar(current.windowTitle(), self.vault_view.pin_btn))
+        else:
+            self.titlebar.set_controls(None)
         self.titlebar.set_brand(self.stack.currentWidget() not in (self.unlock_view, self.pin_view))
 
     def focus_input(self) -> None:
@@ -725,18 +803,48 @@ class MainWindow(QMainWindow):
     def open_editor(self, view: EntryView | None, draft: EntryEdit | None = None, error: str = "") -> None:
         if not self.vc.is_unlocked or self._dialog is not None:
             return
+        if view is not None and draft is None and self.vault_view.in_bin:
+            return  # in the recycle bin: Restore first
         snap = self.vc.snapshot
         dlg = EntryDialog(self, view, draft, error,
                           groups=snap.groups if snap else [], root_uuid=snap.root_uuid if snap else "",
                           default_group=self.vault_view.folder_uuid,
                           usernames=[n for n in known_usernames(snap.entries) if not self.config.username_hidden(n)]
-                          if snap else [], hide_username=self._hide_username)
-        if self.compact:
-            self._fit_to_compact(dlg)
-        if self._run_dialog(dlg) and dlg.result_edit is not None and self.vc.is_unlocked:
+                          if snap else [], hide_username=self._hide_username,
+                          copy_secret=self._copy_generated, shared=self.shared_folders())
+        dlg.finished.connect(lambda result, d=dlg: self._editor_done(d, result))
+        self._show_editor(dlg)
+
+    def _show_editor(self, dlg: QDialog) -> None:
+        """The entry form opens inside the main window (a page, like Settings), so the window can still
+        be moved, resized and pinned or unpinned while editing. Esc or Cancel goes back to the list."""
+        dlg.setWindowFlags(Qt.Widget)
+        dlg.setMinimumSize(0, 0)
+        self._dialog = dlg
+        self.vault_view.panel.close_panel()
+        self.stack.addWidget(dlg)
+        self.stack.setCurrentWidget(dlg)
+        dlg.show()
+        dlg.title.setFocus()
+
+    def _editor_done(self, dlg: QDialog, result: int) -> None:
+        if self._dialog is dlg:
+            self._dialog = None
+        if self.stack.currentWidget() is dlg:
+            self.stack.setCurrentWidget(self.vault_view)
+        self.stack.removeWidget(dlg)
+        dlg.deleteLater()
+        if result and dlg.result_edit is not None and self.vc.is_unlocked:
             if self.config.unhide_username(dlg.result_edit.username):  # used again: suggest it again
                 self.config.save()
             self.vc.save(dlg.result_edit)
+        if self.vc.is_unlocked:
+            self.vault_view.focus_search()
+
+    def _copy_generated(self, password: str) -> int:
+        """The editor's dice: copy the new password (auto-clears, kept out of clipboard history)."""
+        self.clipboard.copy(password)
+        return self.clipboard.clear_seconds
 
     def _hide_username(self, name: str) -> None:
         self.config.hide_username(name)
@@ -755,14 +863,25 @@ class MainWindow(QMainWindow):
         dlg.move(x, y)
 
     def delete_entry(self, view: EntryView) -> None:
-        if not self.vc.is_unlocked or self._dialog is not None:
+        if not self.vc.is_unlocked or self._dialog is not None or self.vault_view.in_bin:
             return
         if small_dialogs.confirm(self, "Delete entry",
                                  f"Move “{view.title or 'untitled'}” to the recycle bin? "
-                                 "You can restore it in KeePassXC, or from the backups folder.",
+                                 "You can restore it from Recycle bin in the folder list.",
                                  "Delete", danger=True):
             self.vault_view.panel.close_panel()
             self.vc.apply([DeleteEntries([view.uuid])], token=("ui", "Moved to recycle bin"))
+
+    def restore_entry(self, view: EntryView) -> None:
+        """Out of the recycle bin, into the folder you pick."""
+        snap = self.vc.snapshot
+        if not self.vc.is_unlocked or self._dialog is not None or snap is None:
+            return
+        uuid = small_dialogs.ask_folder(self, "Restore entry", f"Put “{view.title or 'untitled'}” back in:",
+                                        snap.groups, snap.root_uuid, self.shared_folders(), "Restore")
+        if uuid:
+            self.vault_view.panel.close_panel()
+            self.vc.apply([MoveEntries([view.uuid], group_uuid=uuid)], token=("ui", "Restored"))
 
     # ---- folders -------------------------------------------------------------------
     def _group(self, uuid: str):
@@ -830,7 +949,9 @@ class MainWindow(QMainWindow):
             return
         self.close_help()
         snap = self.vc.snapshot
-        page = SettingsPage(self.config, self.vc.path, snap.groups if snap else ())
+        page = SettingsPage(self.config, self.vc.path, snap.groups if snap else (),
+                            profiles=[v for v in snap.entries if v.is_identity] if snap else (),
+                            shared=self.shared_folders())
         page.change_master.connect(self._change_master)
         page.pin_toggled.connect(self._pin_toggled)
         page.change_pin.connect(self._set_pin)
@@ -843,6 +964,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(page)
         self.stack.setCurrentWidget(page)
         page.setFocus()
+
+    def _apply_suggest(self) -> None:
+        self.vault_view.suggest = self.config.autotype_suggest
+        self.vault_view.set_fill_target(self.vault_view.fill_target)
 
     def close_settings(self) -> None:
         """Save the settings page and go back to the list (or wherever a lock sends us)."""

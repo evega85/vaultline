@@ -119,7 +119,7 @@ def _print(cmd: str, result, as_json: bool) -> None:
         for it in items:
             print(f"  {it['id'][:8]}  {it['title']}: " + "; ".join(it["fixes"]))
         return
-    if cmd == "list":
+    if cmd in ("list", "bin"):
         rows = [[e["id"][:8], e["title"], e["username"], e["folder"] or "/",
                  ("card " if e["type"] == "card" else "") + ("otp" if e["has_otp"] else "")] for e in result]
         print(_table(rows, ["ID", "TITLE", "USERNAME", "FOLDER", ""]))
@@ -185,8 +185,20 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("secret", help="one value from the folder shared with agents (asks you in Vaultline)")
     sp.add_argument("id")
     sp.add_argument("--field", choices=("password", "username", "otp"), default="password")
+    sub.add_parser("bin", help="list what's in the recycle bin (newest first)")
+    sp = sub.add_parser("compare", help="are two entries duplicates? same/different per field, no values shown")
+    sp.add_argument("a")
+    sp.add_argument("b")
+    sp = sub.add_parser("restore", help="move entries out of the recycle bin")
+    sp.add_argument("ids", nargs="+")
+    sp.add_argument("--to", default="", help="folder to put them in (default: top level)")
     sp = sub.add_parser("batch")
     sp.add_argument("file", help='JSON file with a list of ops, or "-" for stdin')
+    pp = sub.add_parser("profile", help="add a sign-up profile (Vaultline shows every value for you to approve)")
+    psub = pp.add_subparsers(dest="pcmd", required=True)
+    pa = psub.add_parser("add")
+    pa.add_argument("file", help='JSON file: {"title": ..., "folder": optional, "fields": {"firstName": ...}}, '
+                                 'or "-" for stdin (kept off the command line so values stay out of process lists)')
 
     a = p.parse_args(argv)
     try:
@@ -209,6 +221,10 @@ def main(argv: list[str] | None = None) -> int:
                 cmd, args = "cards", {}
         elif a.cmd == "delete":
             cmd, args = "delete", {"ids": a.ids}
+        elif a.cmd == "compare":
+            cmd, args = "compare", {"a": a.a, "b": a.b}
+        elif a.cmd == "restore":
+            cmd, args = "restore", {"ids": a.ids, "to": a.to}
         elif a.cmd == "folder":
             cmd = f"folder-{a.fcmd}"
             args = {"path": a.path} if a.fcmd == "create" else {"folder": a.folder}
@@ -224,6 +240,15 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "batch":
             text = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()
             cmd, args = "batch", {"ops": json.loads(text)}
+        elif a.cmd == "profile":
+            text = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError("the profile file must hold one JSON object")
+            result = call("profile-add", {"title": data.get("title"), "folder": data.get("folder"),
+                                          "fields": data.get("fields")}, timeout=200)
+            print(result if isinstance(result, str) else "Profile added.")
+            return 0
         else:
             cmd, args = a.cmd, {}
         _print(cmd, call(cmd, args), a.json)

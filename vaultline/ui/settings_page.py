@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QKeySe
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from .. import autostart, hotkey, icons, theme
+from .widgets import mark_shared_folders
 from ..agent_access import folder_pass_minutes
 from ..config import BACKUP_DIR, Config
 from .unlock_view import recent_choices
@@ -66,7 +67,7 @@ class SettingsPage(QWidget):
     open_database = Signal(str, str)  # path, keyfile ("" path = browse for one)
     close_database = Signal()
 
-    def __init__(self, config: Config, db_path: str, groups=()):
+    def __init__(self, config: Config, db_path: str, groups=(), profiles=(), shared: set[str] | None = None):
         super().__init__()
         self.config = config
         self._db_path = db_path
@@ -154,6 +155,70 @@ class SettingsPage(QWidget):
         self.hotkey_hint = _hint("Click the box and press the keys you want. Use Ctrl, Alt or Win with a key, "
                                  "for example Ctrl+Alt+Space. Press it again to put the search away.")
         lay.addWidget(self.hotkey_hint)
+        root.addWidget(box)
+
+        # Auto-Type
+        box, lay = _section("AUTO-TYPE")
+        self.autotype_on = QCheckBox("Fill the login for the window in front with")
+        self.autotype_on.setChecked(config.autotype_hotkey_enabled)
+        self.autotype_keys = QKeySequenceEdit(QKeySequence.fromString(config.autotype_hotkey
+                                                                      or hotkey.AUTOTYPE_DEFAULT))
+        self.autotype_keys.setMaximumSequenceLength(1)
+        self.autotype_keys.setFixedWidth(160)
+        self.autotype_keys.setToolTip("Click, then press the keys you want")
+        self.autotype_keys.keySequenceChanged.connect(self._check_hotkey)
+        lay.addLayout(_row(self.autotype_on, self.autotype_keys))
+        self.autotype_hint = _hint(
+            "Finds the entry for the window in front and types its username, Tab, password and Enter "
+            "(or the entry's own Auto-Type settings from KeePass). A match on the page title is shown "
+            "for you to confirm first. Or pick an entry here and press Fill (Ctrl+Shift+V) to type it "
+            "into the window you came from.")
+        lay.addWidget(self.autotype_hint)
+        self.autotype_suggest = QCheckBox("Suggest logins for the window you came from")
+        self.autotype_suggest.setChecked(config.autotype_suggest)
+        lay.addWidget(self.autotype_suggest)
+        lay.addWidget(_hint("Open the quick search from a login page and its matching logins are already "
+                            "listed. Nothing is typed until you press Fill."))
+        root.addWidget(box)
+
+        # New login for a sign-up page
+        box, lay = _section("NEW LOGINS")
+        self.newlogin_on = QCheckBox("Make a new login for the window in front with")
+        self.newlogin_on.setChecked(config.newlogin_hotkey_enabled)
+        self.newlogin_keys = QKeySequenceEdit(QKeySequence.fromString(config.newlogin_hotkey
+                                                                      or hotkey.NEWLOGIN_DEFAULT))
+        self.newlogin_keys.setMaximumSequenceLength(1)
+        self.newlogin_keys.setFixedWidth(160)
+        self.newlogin_keys.setToolTip("Click, then press the keys you want")
+        self.newlogin_keys.keySequenceChanged.connect(self._check_hotkey)
+        lay.addLayout(_row(self.newlogin_on, self.newlogin_keys))
+        self.newlogin_hint = _hint(
+            "Or open the quick search from the sign-up page and pick “New login”. It's saved first (your "
+            "profile's email and a new password), then typed: the email in an email box, the password in "
+            "a password box, and again in a confirm box right after it.")
+        lay.addWidget(self.newlogin_hint)
+        self.profile = QComboBox()
+        self.profile.addItem("First profile (by name)", "")
+        for p in sorted(profiles, key=lambda v: (v.title or "").casefold()):
+            self.profile.addItem(p.title or "(untitled profile)", p.uuid)
+        i = self.profile.findData(config.default_profile_uuid)
+        self.profile.setCurrentIndex(i if i >= 0 else 0)
+        lay.addLayout(_row(QLabel("Email from profile"), self.profile))
+        if not profiles:
+            lay.addWidget(_hint("No profiles yet: add one with New entry > Identity."))
+        self.newlogin_folder = QComboBox()
+        self.newlogin_folder.addItem("Top level", "")
+        for g in groups:
+            self.newlogin_folder.addItem("    " * g.depth + g.name, g.uuid)
+        i = self.newlogin_folder.findData(config.newlogin_folder_uuid)
+        self.newlogin_folder.setCurrentIndex(i if i >= 0 else 0)
+        mark_shared_folders(self.newlogin_folder, shared)
+        lay.addLayout(_row(QLabel("Save them in"), self.newlogin_folder))
+        self.newlogin_length = QSpinBox()
+        self.newlogin_length.setRange(12, 64)
+        self.newlogin_length.setValue(max(12, min(64, config.newlogin_length or 20)))
+        self.newlogin_length.setSuffix(" characters")
+        lay.addLayout(_row(QLabel("Password length"), self.newlogin_length))
         root.addWidget(box)
 
         # starting and closing
@@ -296,9 +361,21 @@ class SettingsPage(QWidget):
     def hotkey_text(self) -> str:
         return self.hotkey_keys.keySequence().toString(QKeySequence.PortableText)
 
+    def autotype_text(self) -> str:
+        return self.autotype_keys.keySequence().toString(QKeySequence.PortableText)
+
+    def newlogin_text(self) -> str:
+        return self.newlogin_keys.keySequence().toString(QKeySequence.PortableText)
+
     def _check_hotkey(self, *_):
         ok = hotkey.parse(self.hotkey_text()) is not None
         self.hotkey_hint.setStyleSheet("" if ok else f"color: {theme.DANGER};")
+        ok = hotkey.parse(self.autotype_text()) is not None and not hotkey.same(self.autotype_text(),
+                                                                                self.hotkey_text())
+        self.autotype_hint.setStyleSheet("" if ok else f"color: {theme.DANGER};")
+        ok = hotkey.parse(self.newlogin_text()) is not None and not any(
+            hotkey.same(self.newlogin_text(), t) for t in (self.hotkey_text(), self.autotype_text()))
+        self.newlogin_hint.setStyleSheet("" if ok else f"color: {theme.DANGER};")
 
     def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
         if e.key() == Qt.Key_Escape:
@@ -316,6 +393,16 @@ class SettingsPage(QWidget):
         c.hotkey_enabled = self.hotkey_on.isChecked()
         if hotkey.parse(self.hotkey_text()) is not None:  # an unusable combination keeps the old one
             c.hotkey = self.hotkey_text()
+        c.autotype_hotkey_enabled = self.autotype_on.isChecked()
+        c.autotype_suggest = self.autotype_suggest.isChecked()
+        if hotkey.parse(self.autotype_text()) is not None:
+            c.autotype_hotkey = self.autotype_text()
+        c.newlogin_hotkey_enabled = self.newlogin_on.isChecked()
+        if hotkey.parse(self.newlogin_text()) is not None:
+            c.newlogin_hotkey = self.newlogin_text()
+        c.default_profile_uuid = self.profile.currentData() or ""
+        c.newlogin_folder_uuid = self.newlogin_folder.currentData() or ""
+        c.newlogin_length = self.newlogin_length.value()
         folder = self.folder.currentData() or ""
         c.agent_share_enabled = bool(self.share.isChecked() and folder)
         c.agent_folder_uuid = folder if c.agent_share_enabled else ""

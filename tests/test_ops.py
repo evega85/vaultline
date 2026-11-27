@@ -285,3 +285,14 @@ def test_toll_free_and_local_phone_sorting(vault):
     snap = vault.snapshot()
     assert by_title(snap, "LocalFirst").card_local_phone == "+505 2255 9595"
     assert all(card_fixes(v) == [] for v in snap.entries)
+
+
+def test_recycle_bin_listed_apart_and_restorable(vault):
+    """Deleted entries go to the bin: kept out of the list, but in `binned`, and can be moved back."""
+    snap = vault.snapshot()
+    two = by_title(snap, "Two")
+    snap, _ = vault.save([DeleteEntries([two.uuid])])
+    assert all(e.title != "Two" for e in snap.entries)
+    assert [e.title for e in snap.binned] == ["Two"]
+    snap, _ = vault.save([MoveEntries([two.uuid], group_uuid=group(snap, "A").uuid)])
+    assert by_title(snap, "Two").group == "A" and snap.binned == []

@@ -7,32 +7,37 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QListWi
 
 from .. import icons, theme
 from ..vault import GroupView
+from .widgets import SHARED_TIP
 
 ROW_H = 34
+BIN = "__bin__"  # the Recycle bin row's id
 MAX_LIST_H = 320
 
 
 class _Row(QWidget):
     def __init__(self, popup: "FolderPopup", text: str, count: int, depth: int, uuid: str | None,
-                 active: bool):
+                 active: bool, shared: bool = False):
         super().__init__()
         self.setAttribute(Qt.WA_TranslucentBackground)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10 + depth * 16, 0, 6, 0)
         lay.setSpacing(6)
         ico = QLabel()
-        glyph = icons.FOLDER_CLOSED if uuid else icons.SEARCH
-        ico.setPixmap(icons.glyph(glyph, theme.ACCENT_SOFT if active else theme.TEXT_3, 14).pixmap(14, 14))
+        glyph = icons.DELETE if uuid == BIN else icons.FOLDER_CLOSED if uuid else icons.SEARCH
+        tint = theme.WARN if shared else None  # shared with agents: amber, so it stands out
+        ico.setPixmap(icons.glyph(glyph, tint or (theme.ACCENT_SOFT if active else theme.TEXT_3), 14).pixmap(14, 14))
         lay.addWidget(ico)
         name = QLabel(text)
-        name.setStyleSheet(f"font-size: 13px; color: {theme.TEXT if active else theme.TEXT_2};"
+        name.setStyleSheet(f"font-size: 13px; color: {tint or (theme.TEXT if active else theme.TEXT_2)};"
                            f"{' font-weight: 600;' if active else ''}")
+        if shared:
+            self.setToolTip(SHARED_TIP)
         lay.addWidget(name, 1)
         self.count = QLabel(str(count))
         self.count.setObjectName("Hint")
         lay.addWidget(self.count)
         self.tools: list[QToolButton] = []
-        if uuid:
+        if uuid and uuid != BIN:
             for glyph, tip, sig in ((icons.EDIT, "Rename", popup.rename_requested),
                                     (icons.DELETE, "Delete (to recycle bin)", popup.delete_requested)):
                 b = QToolButton()
@@ -66,7 +71,7 @@ class FolderPopup(QFrame):
     create_requested = Signal()
 
     def __init__(self, parent: QWidget, groups: list[GroupView], counts: dict[str, int], total: int,
-                 current: str | None):
+                 current: str | None, shared: set[str] | None = None, bin_count: int = -1):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -96,10 +101,21 @@ class FolderPopup(QFrame):
             item.setSizeHint(QSize(0, ROW_H))
             item.setData(Qt.UserRole, uuid)
             self.list.addItem(item)
-            self.list.setItemWidget(item, _Row(self, text, count, depth, uuid, uuid == current))
+            self.list.setItemWidget(item, _Row(self, text, count, depth, uuid, uuid == current,
+                                               bool(uuid and uuid in (shared or ()))))
 
         add("All entries", total, 0, None)
-        for g in groups:
+        # the recycle bin, then the folder shared with agents (a reminder), then the rest
+        if bin_count >= 0:
+            add("Recycle bin", bin_count, 0, BIN)
+        shared = shared or set()
+        top = [g for g in groups if g.uuid in shared]
+        rest = [g for g in groups if g.uuid not in shared]
+        base = min((g.depth for g in top), default=0)
+        for g in top:
+            sub = sum(c for u, c in counts.items() if u in _descendants(g, groups))
+            add(g.name, sub, g.depth - base, g.uuid)
+        for g in rest:
             sub = sum(c for u, c in counts.items() if u in _descendants(g, groups))
             add(g.name, sub, g.depth, g.uuid)
         self.list.itemClicked.connect(self._pick)

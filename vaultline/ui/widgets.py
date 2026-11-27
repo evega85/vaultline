@@ -178,3 +178,30 @@ class OtpButton(QPushButton):
         p.setPen(QColor("white" if pressed else (theme.WARN if low else theme.TEXT)))
         p.drawText(QRectF(26, 0, self.width() - 30, self.height()), Qt.AlignVCenter | Qt.AlignLeft,
                    otplib.pretty(code))
+
+
+SHARED_TIP = "Shared with agents: they can ask for passwords here (each request asks you)"
+
+
+def mark_shared_folders(combo, shared: set[str]) -> None:
+    """Mark the folders shared with agents in a folder picker (amber icon, "shared with agents"), and
+    give the box an amber border while one of them is picked, so it's never chosen by accident."""
+    from PySide6.QtCore import Qt as _Qt
+    from .. import icons as _icons
+    if not shared:
+        return
+    for i in range(combo.count()):
+        if combo.itemData(i) in shared:
+            # an amber icon and words (a text colour alone is overridden by the app's style sheet)
+            combo.setItemText(i, combo.itemText(i) + "  · shared with agents")
+            combo.setItemData(i, _icons.glyph(_icons.FOLDER_CLOSED, theme.WARN, 14), _Qt.DecorationRole)
+            combo.setItemData(i, SHARED_TIP, _Qt.ToolTipRole)
+
+    def look(_i=0):
+        on = combo.currentData() in shared
+        combo.setProperty("shared", on)  # theme: QComboBox[shared="true"] (only the closed box, not its list)
+        combo.style().unpolish(combo)
+        combo.style().polish(combo)
+        combo.setToolTip(SHARED_TIP if on else "")
+    combo.currentIndexChanged.connect(look)
+    look()

@@ -217,7 +217,9 @@ def main() -> int:
     IdleLock(app, controller, config)
     gate = AgentGate(controller, config, ask=lambda req, decide: show_prompt(req, decide, near=window), parent=app)
     window.settings_saved.connect(gate.reset)
-    cli = CliServer(controller, app, gate=gate)
+    from .ui.profile_prompt import show_profile_prompt
+    cli = CliServer(controller, app, gate=gate,
+                    ask_profile=lambda req, decide: show_profile_prompt(req, decide, near=window))
     cli.changed_by_cli.connect(lambda summary: window.toast.show_message("Command line", summary, "info", 3000))
     tray = Tray(window, controller, config, gate) if QSystemTrayIcon.isSystemTrayAvailable() else None
     if tray is None:

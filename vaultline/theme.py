@@ -111,6 +111,7 @@ QComboBox {{
 QComboBox:hover {{ border-color: {BORDER_STRONG}; }}
 QComboBox:focus {{ border-color: {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox[shared="true"] {{ border-color: {WARN}; }}
 QListView#Suggestions {{
     background: {RAISED}; border: 1px solid {BORDER_STRONG}; border-radius: 6px; color: {TEXT};
     selection-background-color: {ACCENT}; selection-color: white; outline: none; padding: 0; font-size: 13px;

@@ -32,6 +32,7 @@ BACK = "\uE72B"
 PIN = "\uE718"
 PIN_FILL = "\uE841"
 HELP = "\uE897"
+FILL = "\uE765"  # KeyboardClassic: Fill (Auto-Type)
 MENU = "\uE700"  # GlobalNavigationButton (three lines)
 
 

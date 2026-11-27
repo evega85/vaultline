@@ -285,6 +285,8 @@ class AgentGate(QObject):
             refuse("outside shared folder", "That entry isn't in the folder shared with agents.")
         if current.is_card:
             refuse("card", "Cards can't be shared with agents.")
+        if current.is_identity:
+            refuse("identity", "Sign-up profiles can't be shared with agents.")
         if field_name not in FIELDS:
             refuse("unknown field", f"Field must be one of: {', '.join(FIELDS)}")
         if field_name in current.references:

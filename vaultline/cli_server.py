@@ -19,13 +19,19 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from shiboken6 import isValid
 
-from . import pipe_name
-from .agent_access import AccessRefused, AgentGate, client_process, shared_folder_path, shared_ids_for
+import re
+
+from . import identity as idlib, pipe_name
+from .agent_access import AccessRefused, AgentGate, client_process, log_access, shared_folder_path, shared_ids_for
 from .controller import VaultController
 from .vault import (CreateFolder, DeleteEntries, DeleteFolder, EntryView, MoveEntries, MoveFolder, NormalizeCards,
-                    RenameFolder, Snapshot, UpdateEntry, card_fixes)
+                    RenameFolder, Snapshot, UpdateEntry, card_fixes, CustomField, EntryEdit)
 
 PIPE_NAME = pipe_name("cli")
+# `profile add`: short names (Bitwarden's) -> profile keys. The one place the CLI hands over values
+# to be written, and only after the user approves every value in Vaultline (see _profile_add).
+PROFILE_FIELDS = {k[len(idlib.PREFIX):]: k for k in idlib.KEYS}
+_PROFILE_BAD = re.compile(r"[\x00-\x1f\x7f]")
 MAX_REQUEST = 4 * 1024 * 1024
 
 
@@ -48,7 +54,7 @@ def entry_meta(v: EntryView) -> dict:
         "folder": v.group.replace(" / ", "/"),
         "folder_id": v.group_uuid,
         "tags": list(v.tags),
-        "type": "card" if v.is_card else "entry",
+        "type": "card" if v.is_card else ("identity" if v.is_identity else "entry"),
         "has_password": bool(v.password),
         "has_otp": v.totp is not None,
         "has_notes": bool(v.notes),
@@ -74,13 +80,32 @@ def entry_meta(v: EntryView) -> dict:
     return meta
 
 
+def compare_entries(a: EntryView, b: EntryView) -> dict:
+    """Which fields two entries share, as true/false only (for finding real duplicates). No values."""
+    def otp(v):
+        return v.totp.secret if v.totp is not None else ""
+    ca, cb = {f.key: f.value for f in a.custom}, {f.key: f.value for f in b.custom}
+    same = {"title": a.title == b.title, "username": a.username == b.username, "password": a.password == b.password,
+            "url": a.url == b.url, "notes": a.notes == b.notes, "otp": otp(a) == otp(b),
+            "custom_fields": ca == cb, "attachments": a.attachments == b.attachments}
+    return {"a": a.uuid, "b": b.uuid, "same": same, "identical": all(same.values()),
+            "only_in_a": sorted(set(ca) - set(cb)), "only_in_b": sorted(set(cb) - set(ca)),
+            "a_has": {"notes": bool(a.notes), "otp": a.totp is not None, "custom_fields": len(ca)},
+            "b_has": {"notes": bool(b.notes), "otp": b.totp is not None, "custom_fields": len(cb)}}
+
+
 class CliServer(QObject):
     changed_by_cli = Signal(str)  # human summary, for a toast
 
-    def __init__(self, controller: VaultController, parent: QObject | None = None, gate: AgentGate | None = None):
+    def __init__(self, controller: VaultController, parent: QObject | None = None, gate: AgentGate | None = None,
+                 ask_profile=None):
         super().__init__(parent)
         self.vc = controller
         self.gate = gate  # None: `secret` is always refused
+        self.ask_profile = ask_profile  # (request, decide) -> prompt with .close(); None: `profile add` refused
+        self._profile: tuple | None = None  # (socket, prompt) while one is being asked
+        for sig in (controller.locked, controller.pin_locked):
+            sig.connect(lambda *_: self._end_profile("The vault was locked. Nothing was added."))
         self._ids = count(1)
         self._waiting: dict[int, tuple[QLocalSocket, str]] = {}
         self._buffers: dict[QLocalSocket, bytes] = {}
@@ -101,6 +126,8 @@ class CliServer(QObject):
 
     def _drop(self, sock: QLocalSocket) -> None:
         self._buffers.pop(sock, None)
+        if self._profile is not None and self._profile[0] is sock:
+            self._end_profile("")
         if self.gate is not None:
             self.gate.cancel(sock)
         if isValid(sock):
@@ -157,6 +184,8 @@ class CliServer(QObject):
         snap = self._snap()
         if cmd == "secret":
             return self._secret(snap, args, sock)
+        if cmd == "profile-add":
+            return self._profile_add(snap, args, sock)
         if cmd == "folders":
             counts: dict[str, int] = {}
             for v in snap.entries:
@@ -179,6 +208,25 @@ class CliServer(QObject):
             return [entry_meta(v) for v in items]
         if cmd == "show":
             return entry_meta(self._entry(snap, args["id"]))
+        if cmd == "compare":  # are two entries the same? Answers same/different per field, never a value
+            a, b = self._entry(snap, args["a"]), self._entry(snap, args["b"])
+            return compare_entries(a, b)
+        if cmd == "bin":  # what's in the recycle bin, newest first (no secrets, as everywhere)
+            return [entry_meta(v) for v in snap.binned]
+        if cmd == "restore":  # move entries out of the recycle bin into a folder
+            binned = {v.uuid: v for v in snap.binned}
+            ids = []
+            for ident in self._list(args, "ids"):
+                low = str(ident).lower().replace("-", "")
+                hits = [u for u in binned if len(low) >= 6 and u.startswith(low)]
+                if len(hits) != 1:
+                    raise CliError(f"{ident}: not one entry in the recycle bin (see `vaultline-cli bin`)")
+                ids.append(hits[0])
+            target = str(args.get("to") or "").strip()
+            fid = snap.root_uuid if target in ("", "/") else self._folder_id(snap, target)
+            self._guard_shared(snap, [""], fid)
+            titles = ", ".join(binned[u].title for u in ids)
+            return self._apply(sock, [MoveEntries(ids, group_uuid=fid)], f"restored {titles}")
         if cmd == "cards":
             return [entry_meta(v) for v in snap.entries if v.is_card]
         if cmd == "cards-fix":
@@ -218,6 +266,81 @@ class CliServer(QObject):
         except AccessRefused as exc:
             raise CliError(str(exc)) from None
         return None  # reply comes from the gate (now, or after the prompt)
+
+    # ---- profile add (asks in Vaultline) ----------------------------------------------------------
+    def _profile_add(self, snap: Snapshot, args: dict, sock: QLocalSocket):
+        """Add a sign-up profile, only if the user presses Add in a prompt showing every value.
+        Logged (title and outcome, never values) in the agent access log."""
+        if self.ask_profile is None:
+            raise CliError("Adding profiles from the command line isn't available.")
+        if self._profile is not None:
+            raise CliError("Vaultline is already asking about a profile. Answer that first.")
+        title = args.get("title")
+        if not isinstance(title, str) or not title.strip() or len(title) > 100 or _PROFILE_BAD.search(title):
+            raise CliError("Give the profile a title (one line, up to 100 characters).")
+        raw = args.get("fields")
+        if not isinstance(raw, dict) or not raw:
+            raise CliError("No profile fields given.")
+        fields: dict[str, str] = {}
+        for name, value in raw.items():
+            key = PROFILE_FIELDS.get(str(name))
+            if key is None:
+                raise CliError(f"Unknown profile field: {name}. Use: {', '.join(PROFILE_FIELDS)}")
+            if not isinstance(value, str) or len(value) > 200 or _PROFILE_BAD.search(value):
+                raise CliError(f"{name} must be one line of text (up to 200 characters).")
+            if value.strip():
+                fields[key] = value.strip()
+        for v in [title, *fields.values()]:
+            if "{REF:" in v.upper():
+                raise CliError("Field references ({REF:...}) can't be set from the command line")
+        if idlib.BIRTH in fields:
+            d = idlib.parse_birth_date(fields[idlib.BIRTH])
+            if d is None:
+                raise CliError("birthDate must be YYYY-MM-DD.")
+            fields[idlib.BIRTH] = idlib.format_date(d, "iso")
+        if not fields:
+            raise CliError("No profile fields given.")
+        folder = str(args.get("folder") or "").strip()
+        fid = self._folder_id(snap, folder) if folder not in ("", "/") else snap.root_uuid
+        self._guard_shared(snap, [""], fid)  # never straight into the folder shared with agents
+        ordered = {k: fields[k] for k in idlib.KEYS if k in fields}
+        client = client_process(sock)
+        request = {"title": title.strip(), "folder": folder if folder not in ("", "/") else "",
+                   "fields": ordered, "client": client}
+
+        def decide(decision: str) -> None:
+            if self._profile is None or self._profile[0] is not sock:
+                return  # already ended (lock, caller gone)
+            self._profile = None
+            if decision != "add" or not self.vc.is_unlocked:
+                log_access("profile add: cancelled", "profile", title, "", client)
+                self._reply(sock, {"ok": False, "error": "Cancelled in Vaultline. Nothing was added."})
+                return
+            log_access("profile add: approved", "profile", title, "", client)
+            custom = [CustomField(k, v, k in idlib.PROTECTED) for k, v in ordered.items()]
+            edit = EntryEdit(None, title.strip(), "", "", "", "", None, fid, "", custom)
+            try:
+                self._apply(sock, [edit], f"added profile {title.strip()}")
+            except CliError as exc:
+                self._reply(sock, {"ok": False, "error": str(exc)})
+
+        log_access("profile add: asked", "profile", title, "", client)
+        self._profile = (sock, None)
+        prompt = self.ask_profile(request, decide)
+        if self._profile is not None and self._profile[0] is sock:
+            self._profile = (sock, prompt)
+        return None  # the reply comes after the prompt
+
+    def _end_profile(self, message: str) -> None:
+        """Lock or caller gone: close the prompt; nothing is added."""
+        if self._profile is None:
+            return
+        sock, prompt = self._profile
+        self._profile = None
+        if prompt is not None:
+            prompt.close()
+        if message:
+            self._reply(sock, {"ok": False, "error": message})
 
     def _guard_shared(self, snap: Snapshot, moving_from: list[str], dest_uuid: str | None, dest_path: str = ""):
         """Refuse to bring entries or folders INTO the agents' folder from outside it: otherwise the

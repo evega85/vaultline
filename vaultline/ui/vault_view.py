@@ -7,10 +7,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QLineEdit
                                QListWidgetItem, QMenu, QPushButton, QVBoxLayout, QWidget)
 
 from .. import icons, theme
+from ..autotype import find_matches, is_browser_title, is_signup_title, site_from_title
 from ..vault import EntryView, GroupView, Snapshot
 from .detail_panel import DetailPanel
 from .entry_row import COMPACT_ROW_HEIGHT, ROW_HEIGHT, EntryRow
-from .folder_popup import FolderPopup
+from .folder_popup import BIN, FolderPopup
 
 
 def _top_button(glyph: str, tip: str) -> QPushButton:
@@ -32,6 +33,7 @@ class VaultView(QWidget):
     edit_requested = Signal(object)        # EntryView
     lock_requested = Signal()
     delete_requested = Signal(object)      # EntryView
+    restore_requested = Signal(object)     # EntryView in the recycle bin: move it back into a folder
     settings_requested = Signal()
     folder_create_requested = Signal()
     folder_rename_requested = Signal(str)  # folder uuid
@@ -42,6 +44,9 @@ class VaultView(QWidget):
     mode_requested = Signal()              # Ctrl+M: palette <-> full window
     icon_requested = Signal()              # menu: shrink to the floating icon
     escape_unused = Signal()               # Esc with nothing left to step back from
+    fill_requested = Signal(object)        # EntryView: type it into the window you came from
+    fill_field_requested = Signal(object, str)  # EntryView, field: type just that field
+    new_login_requested = Signal()         # quick box: new login for the window you came from
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -52,6 +57,12 @@ class VaultView(QWidget):
         self._folder: GroupView | None = None
         self.compact = False
         self._last_uuid: str | None = None  # last selected entry, so a view switch can bring it back
+        self.fill_target = ""  # title of the window Fill would type into ("" = none)
+        self.suggest = True    # quick box, nothing typed: list the logins for that window (Settings)
+        self._suggested: set[str] = set()  # their uuids
+        self.shared_folders = lambda: set()  # folders shared with agents (set by MainWindow), tinted
+        self._snap: Snapshot | None = None
+        self.in_bin = False  # showing the recycle bin instead of the vault
 
         root = self._root = QVBoxLayout(self)
         root.setContentsMargins(16, 4, 16, 0)
@@ -133,6 +144,15 @@ class VaultView(QWidget):
         self.list.customContextMenuRequested.connect(self._context_menu)
         root.addWidget(self.list, 1)
 
+        # quick box opened from another window: make a new login for it (first on a sign-up page)
+        self.new_login_btn = QPushButton()
+        self.new_login_btn.setObjectName("Link")
+        self.new_login_btn.setCursor(Qt.PointingHandCursor)
+        self.new_login_btn.setFocusPolicy(Qt.NoFocus)
+        self.new_login_btn.clicked.connect(self.new_login_requested)
+        self.new_login_btn.hide()
+        root.addWidget(self.new_login_btn, 0, Qt.AlignLeft)
+
         self.empty = QLabel()
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setStyleSheet(f"font-size: 13px; color: {theme.TEXT_3}; padding: 40px;")
@@ -149,7 +169,7 @@ class VaultView(QWidget):
         self.status_dot.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 8px;")
         self.status = QLabel()
         self.status.setObjectName("Hint")
-        hints = QLabel("↵ Pass  ·  Ctrl+B User  ·  Ctrl+T OTP  ·  Ctrl+I Details  ·  Ctrl+N New")
+        hints = QLabel("↵ Pass  ·  Ctrl+B User  ·  Ctrl+T OTP  ·  Ctrl+Shift+V Fill  ·  Ctrl+I Details")
         hints.setObjectName("Hint")
         f.addWidget(self.status_dot)
         f.addWidget(self.status, 1)
@@ -161,6 +181,9 @@ class VaultView(QWidget):
         self.panel.copy_text.connect(self.copy_text)
         self.panel.edit_requested.connect(self.edit_requested)
         self.panel.delete_requested.connect(self.delete_requested)
+        self.panel.restore_requested.connect(self.restore_requested)
+        self.panel.fill_requested.connect(self.fill_requested)
+        self.panel.fill_field_requested.connect(self.fill_field_requested)
         self.panel.closed.connect(self.focus_search)
         self.panel.closed.connect(self._content_changed)
 
@@ -173,6 +196,7 @@ class VaultView(QWidget):
         """Replace the list, keeping search text, folder, selection and scroll position."""
         keep_uuid = self.current().uuid if self.current() else None
         scroll = self.list.verticalScrollBar().value()
+        self._snap = snap
         self._groups = snap.groups
         restore, self._restore = getattr(self, "_restore", None), None
         if restore:
@@ -197,17 +221,21 @@ class VaultView(QWidget):
         self.list.setUpdatesEnabled(False)
         self.list.blockSignals(True)
         self.list.clear()
-        self._views, self._rows = snap.entries, []
-        for v in snap.entries:
+        shown = snap.binned if self.in_bin else snap.entries
+        self._views, self._rows = shown, []
+        for v in shown:
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, self.row_height))
             row = EntryRow(v, self.pixmap_for(v))
             row.set_compact(self.compact)
             row.copy_requested.connect(lambda kind, it=item: self._row_copy(it, kind))
+            row.fill_requested.connect(lambda it=item: self._row_fill(it))
+            row.set_fill_target(self.fill_target)
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
             self._rows.append(row)
         self.list.blockSignals(False)
+        self._update_suggestions(refilter=False)
         self._apply_filter(keep_uuid=keep_uuid)
         self.list.verticalScrollBar().setValue(scroll)
         self.list.setUpdatesEnabled(True)
@@ -231,12 +259,29 @@ class VaultView(QWidget):
         self.panel.close_panel()
         self.list.clear()
         self._views, self._rows, self._groups, self._pixmaps = [], [], [], {}
+        self._suggested = set()
         self._last_uuid = None
         self._folder = None
+        self._snap = None
+        self.in_bin = False
+        self.panel.set_bin_mode(False)
         self._update_folder_button()
         self.search.blockSignals(True)
         self.search.clear()
         self.search.blockSignals(False)
+
+    def set_fill_target(self, title: str) -> None:
+        self.fill_target = title
+        self._update_suggestions()
+        self._update_new_login()
+        self.panel.set_fill_target(title)
+        for row in self._rows:
+            row.set_fill_target(title)
+
+    @property
+    def views(self) -> list[EntryView]:
+        """The vault's entries (never the recycle bin's, even while it's shown)."""
+        return self._snap.entries if self._snap is not None else self._views
 
     def current(self) -> EntryView | None:
         row = self.list.currentRow()
@@ -271,22 +316,45 @@ class VaultView(QWidget):
 
     # ---- folders --------------------------------------------------------------
     def _update_folder_button(self) -> None:
-        name = self._folder.name if self._folder else "All"
+        name = "Recycle bin" if self.in_bin else self._folder.name if self._folder else "All"
         self.folder_btn.setText("" if self.compact else f" {name if len(name) <= 16 else name[:15] + '…'}")
         self.folder_btn.setToolTip(f"Folder: {name}" if self.compact else "Show one folder")
-        self.folder_btn.setProperty("active", self._folder is not None)
+        self.folder_btn.setProperty("active", self._folder is not None or self.in_bin)
         self.folder_btn.style().polish(self.folder_btn)
 
     def _folder_menu(self) -> None:
+        entries = self._snap.entries if self._snap else []
         counts: dict[str, int] = {}
-        for v in self._views:
+        for v in entries:
             counts[v.group_uuid] = counts.get(v.group_uuid, 0) + 1
-        pop = FolderPopup(self, self._groups, counts, len(self._views), self.folder_uuid)
-        pop.selected.connect(lambda uuid: self.set_folder(next((g for g in self._groups if g.uuid == uuid), None)))
+        pop = FolderPopup(self, self._groups, counts, len(entries), BIN if self.in_bin else self.folder_uuid,
+                          self.shared_folders(), len(self._snap.binned) if self._snap else -1)
+        pop.selected.connect(self._folder_picked)
         pop.rename_requested.connect(self.folder_rename_requested)
         pop.delete_requested.connect(self.folder_delete_requested)
         pop.create_requested.connect(self.folder_create_requested)
         pop.popup_below(self.folder_btn)
+
+    def _folder_picked(self, uuid) -> None:
+        if uuid == BIN:
+            self.show_bin(True)
+            return
+        if self.in_bin:
+            self.show_bin(False)
+        self.set_folder(next((g for g in self._groups if g.uuid == uuid), None))
+
+    def show_bin(self, on: bool) -> None:
+        """List the recycle bin (Restore puts an entry back) or go back to the vault."""
+        if on == self.in_bin:
+            return
+        self.in_bin = on
+        self._folder = None
+        self.panel.close_panel()
+        self.panel.set_bin_mode(on)
+        if self._snap is not None:
+            self.set_snapshot(self._snap)
+        self._update_folder_button()
+        self.focus_search()
 
     def set_folder(self, g: GroupView | None) -> None:
         self._folder = g
@@ -321,7 +389,7 @@ class VaultView(QWidget):
             self.search.setMaximumHeight(16777215)
         self.search.setProperty("compact", on)
         self.search.style().polish(self.search)
-        self.search.setPlaceholderText("Search…" if on else "Search vault…")
+        self._update_placeholder()
         self.menu_btn.setVisible(not on)
         self.top_bar.layout().setContentsMargins(0, 0, 0 if on else 8, 0)  # the title bar keeps a drag gap
         self.footer.setVisible(not on)
@@ -346,6 +414,8 @@ class VaultView(QWidget):
         if self.panel.isVisible():
             return None
         bottom = self._root.contentsMargins().bottom()
+        if self.new_login_btn.isVisible():
+            bottom += self.new_login_btn.sizeHint().height() + self._root.spacing()
         if self.list.isVisible():
             shown = sum(1 for i in range(self.list.count()) if not self.list.isRowHidden(i))
             return shown * (self.row_height + 2) + bottom  # +2: the item's 1px margins
@@ -377,7 +447,52 @@ class VaultView(QWidget):
             f"QPushButton:hover {{ background: rgba(99, 102, 241, 0.32); }}" if on else "")
         self.pin_btn.setToolTip("Kept on top (click to stop)" if on else "Keep on top")
 
+    def _update_suggestions(self, refilter: bool = True) -> None:
+        """The logins matching the window you came from, listed in the quick box before you type.
+        Only listed: nothing is typed until you press Fill."""
+        found = ({m.entry.uuid for m in find_matches(self.views, self.fill_target)}
+                 if self.suggest and self.fill_target else set())
+        changed = found != self._suggested
+        self._suggested = found
+        self._update_placeholder()
+        if refilter and changed and self._idle():
+            self._apply_filter()
+
+    def _update_new_login(self) -> None:
+        """The quick box's "New login for …" link: shown for a browser window while nothing is typed;
+        above the suggestions when the page title looks like a sign-up page, below them otherwise."""
+        # web pages only (or another program's own sign-up window), so it isn't offered for every window
+        show = bool(self.fill_target) and self._idle() and (is_browser_title(self.fill_target)
+                                                             or is_signup_title(self.fill_target))
+        self.new_login_btn.setVisible(show)
+        if not show:
+            return
+        site = site_from_title(self.fill_target) or "this window"
+        if len(site) > 40:
+            site = site[:39] + "…"
+        signup = is_signup_title(self.fill_target)
+        # QPushButton text is plain; & would be read as a shortcut marker
+        self.new_login_btn.setText(f"＋ New login for “{site}”".replace("&", "&&"))
+        self.new_login_btn.setToolTip("Saves a new login (your profile's email and a new password), "
+                                      "then types it into the window you came from")
+        want = 0 if signup else self._root.indexOf(self.list) + 1
+        if self._root.indexOf(self.new_login_btn) != want:
+            self._root.removeWidget(self.new_login_btn)
+            self._root.insertWidget(want if signup else self._root.indexOf(self.list) + 1, self.new_login_btn,
+                                    0, Qt.AlignLeft)
+
+    def _update_placeholder(self) -> None:
+        if not self.compact:
+            text = "Search vault…"
+        elif self._suggested:
+            text = "Suggested for this window · type to search"
+        else:
+            text = "Search…"
+        self.search.setPlaceholderText(text)
+
     def _idle(self) -> bool:
+        if self.in_bin:
+            return False
         """Compact window with nothing asked for yet: list nothing."""
         return self.compact and not self.search.text().strip() and self._folder is None
 
@@ -386,7 +501,10 @@ class VaultView(QWidget):
         idle = self._idle()
         first_visible, keep_row = -1, -1
         for i, v in enumerate(self._views):
-            show = not idle and self._in_folder(v) and (v.matches(terms) if terms else True)
+            if idle:
+                show = v.uuid in self._suggested
+            else:
+                show = self._in_folder(v) and (v.matches(terms) if terms else True)
             self.list.setRowHidden(i, not show)
             if show:
                 if first_visible < 0:
@@ -411,6 +529,7 @@ class VaultView(QWidget):
             else:
                 self.empty.setText("This folder is empty")
         self.update_status()
+        self._update_new_login()
         self._content_changed()
 
     # ---- filtering & navigation ---------------------------------------------
@@ -433,6 +552,10 @@ class VaultView(QWidget):
         self.list.setCurrentItem(item)
         self.copy_requested.emit(kind, self._views[self.list.row(item)])
 
+    def _row_fill(self, item: QListWidgetItem) -> None:
+        self.list.setCurrentItem(item)
+        self.fill_requested.emit(self._views[self.list.row(item)])
+
     def _edit_row(self, row: int) -> None:
         if 0 <= row < len(self._views):
             self.edit_requested.emit(self._views[row])
@@ -444,6 +567,11 @@ class VaultView(QWidget):
         self.list.setCurrentItem(item)
         v = self._views[self.list.row(item)]
         m = QMenu(self)
+        if self.in_bin:  # deleted entries: put back, or look at them
+            m.addAction("Restore…", lambda: self.restore_requested.emit(v))
+            m.addAction("Details", lambda: self.open_details(v))
+            m.exec(self.list.viewport().mapToGlobal(pos))
+            return
         items = (("Copy card number", "card_number", v.card_number), ("Copy password", "password", v.password),
                  ("Copy card code", "card_code", v.card_code), ("Copy URL", "url", v.url)) if v.is_card else             (("Copy username", "username", v.username), ("Copy password", "password", v.password),
              ("Copy one-time code", "otp", v.totp), ("Copy URL", "url", v.url))
@@ -453,6 +581,11 @@ class VaultView(QWidget):
             a.triggered.connect(lambda _=False, k=kind: self.copy_requested.emit(k, v))
             m.addAction(a)
         m.addSeparator()
+        where = self.fill_target if len(self.fill_target) <= 40 else self.fill_target[:39] + "…"
+        where = where.replace("&", "&&")  # not a menu accelerator
+        fill = m.addAction(f"Fill into “{where}”	Ctrl+Shift+V" if where else "Fill	Ctrl+Shift+V",
+                           lambda: self.fill_requested.emit(v))
+        fill.setEnabled(v.autotype.enabled)
         m.addAction("Details", lambda: self.open_details(v))
         m.addAction("Edit…", lambda: self.edit_requested.emit(v))
         m.addSeparator()
@@ -539,6 +672,8 @@ class VaultView(QWidget):
                 Qt.Key_Escape: self._escape,
                 Qt.Key_F1: self.help_requested.emit,
             }
+        elif mods == (Qt.ControlModifier | Qt.ShiftModifier):
+            actions = {Qt.Key_V: self._fill_current}
         elif ctrl:
             actions = {
                 Qt.Key_B: lambda: self._copy_current("username"),
@@ -564,6 +699,11 @@ class VaultView(QWidget):
         v = self.current()
         if v is not None:
             self.copy_requested.emit(kind, v)
+
+    def _fill_current(self) -> None:
+        v = self.current()
+        if v is not None:
+            self.fill_requested.emit(v)
 
     def _clear_search(self) -> None:
         self.search.clear()

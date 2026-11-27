@@ -17,6 +17,20 @@ SECTIONS: list[tuple[str, list[str]]] = [
         "One-time codes are stored in the standard “otp” field, so KeePassXC, KeePassium and KeePassDX "
         "show the same codes.",
     ]),
+    ("FILLING LOGINS ON THIS PC (AUTO-TYPE)", [
+        "Fill: click into the login box, then find the entry in Vaultline and press the keyboard icon at the "
+        "end of its row (or Ctrl+Shift+V). It types the username, Tab, password and Enter into the window you "
+        "were in before Vaultline; in a password box, just the password and Enter. Point at the icon to see "
+        "which window.",
+        "The quick search lists the logins for the page you came from before you type (Settings > Auto-Type). "
+        "In the details panel, the keyboard icon beside the username, password or one-time code types just "
+        "that one, for example a code asked on a second page.",
+        "Auto-Type shortcut (Settings > Auto-Type, Ctrl+Alt+A): press it in a login window or web page. "
+        "Vaultline finds the entry and shows it by the cursor: press Enter to fill it, or search for another.",
+        "Entries with a window association set in KeePass or KeePassXC are typed straight away. Their "
+        "Auto-Type settings (on/off, sequence, associations) are used as they are and never changed.",
+        "Windows doesn't let Vaultline type into programs running as administrator: copy and paste there.",
+    ]),
     ("MOVING FROM ANOTHER PASSWORD MANAGER (KEEPASSXC)", [
         "1.  Install KeePassXC on a computer (keepassxc.org).",
         "2.  Export your passwords from the old app (for example Bitwarden, 1Password, or a CSV file).",

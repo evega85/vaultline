@@ -5,10 +5,10 @@ from datetime import datetime
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap
-from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QMenu, QPushButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
-from .. import icons, otp as otplib, theme
+from .. import icons, identity as idlib, otp as otplib, theme
 from ..vault import CARD_SLOT_KEYS, is_toll_free, CARD_TAG, LEGACY_CODE_KEY, LEGACY_EXPIRY_KEY, EntryView
 from .widgets import Avatar
 
@@ -36,7 +36,8 @@ def _tool(glyph: str, tip: str) -> QToolButton:
 
 class _Field(QWidget):
     def __init__(self, label: str, value: str, panel: "DetailPanel", secret: bool = False,
-                 mono: bool = False, url: bool = False, wrap: bool = False, copy_value: str | None = None):
+                 mono: bool = False, url: bool = False, wrap: bool = False, copy_value: str | None = None,
+                 fill: str = "", fill_options: list[tuple[str, str]] | None = None):
         super().__init__()
         self._value, self._secret, self._shown = value, secret, not secret
         lay = QVBoxLayout(self)
@@ -70,6 +71,10 @@ class _Field(QWidget):
             b = _tool(icons.OPEN, "Open in browser")
             b.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(value)))
             row.addWidget(b, 0, Qt.AlignTop)
+        if fill_options:  # typed in a choice of formats (identity.fill_options): a token per format
+            row.addWidget(panel.field_fill_button("", label.lower(), fill_options), 0, Qt.AlignTop)
+        elif fill:
+            row.addWidget(panel.field_fill_button(fill, label.lower()), 0, Qt.AlignTop)
         copy = _tool(icons.COPY, f"Copy {label.lower()}")
         to_copy = value if copy_value is None else copy_value
         copy.clicked.connect(lambda: panel.copy_text.emit(label, to_copy))
@@ -108,6 +113,8 @@ class _OtpField(QWidget):
         row.addSpacing(8)
         row.addWidget(self.secs)
         row.addStretch()
+        if not view.is_card:
+            row.addWidget(panel.field_fill_button("otp", "one-time code"))
         copy = _tool(icons.COPY, "Copy code (Ctrl+T)")
         copy.clicked.connect(lambda: panel.copy_text.emit("OTP", otplib.current(self.totp)[0]))
         row.addWidget(copy)
@@ -155,6 +162,10 @@ class DetailPanel(QFrame):
     copy_text = Signal(str, str)      # label, value
     edit_requested = Signal(object)   # EntryView
     delete_requested = Signal(object)  # EntryView
+    restore_requested = Signal(object)  # EntryView in the recycle bin
+    fill_requested = Signal(object)   # EntryView: type it into the window you came from
+    # EntryView, "username" | "password" | "otp" | an identity.fill_options token: just that field
+    fill_field_requested = Signal(object, str)
     closed = Signal()
 
     def __init__(self, parent: QWidget):
@@ -166,6 +177,8 @@ class DetailPanel(QFrame):
         shadow.setColor(QColor(0, 0, 0, 150))
         self.setGraphicsEffect(shadow)
         self.view: EntryView | None = None
+        self._field_fills: list[QToolButton] = []  # the keyboard icons beside fields
+        self._fill_title = ""
         self._otp: _OtpField | None = None
 
         outer = QVBoxLayout(self)
@@ -189,21 +202,35 @@ class DetailPanel(QFrame):
         titles.addWidget(self.title)
         titles.addWidget(self.folder)
         h.addLayout(titles, 1)
-        edit = QPushButton(" Edit")
+        self.fill_btn = _tool(icons.FILL, "")
+        self.fill_btn.clicked.connect(lambda: self.view and self.fill_requested.emit(self.view))
+        self.edit_btn = edit = QPushButton(" Edit")
         edit.setObjectName("Ghost")
         edit.setIcon(icons.glyph(icons.EDIT, theme.TEXT_2, 14))
         edit.setFocusPolicy(Qt.NoFocus)
         edit.setCursor(Qt.PointingHandCursor)
         edit.setToolTip("Edit (Ctrl+E or double-click)")
         edit.clicked.connect(lambda: self.view and self.edit_requested.emit(self.view))
-        delete = _tool(icons.DELETE, "Delete (moves to the recycle bin)")
+        self.delete_btn = delete = _tool(icons.DELETE, "Delete (moves to the recycle bin)")
         delete.clicked.connect(lambda: self.view and self.delete_requested.emit(self.view))
         close = _tool(icons.CLOSE, "Close (Esc)")
         close.clicked.connect(self.close_panel)
+        self.restore_btn = QPushButton(" Restore")
+        self.restore_btn.setObjectName("Primary")
+        self.restore_btn.setFocusPolicy(Qt.NoFocus)
+        self.restore_btn.setCursor(Qt.PointingHandCursor)
+        self.restore_btn.setToolTip("Take it out of the recycle bin and put it in a folder")
+        self.restore_btn.clicked.connect(lambda: self.view and self.restore_requested.emit(self.view))
+        self.restore_btn.hide()
+        self._in_bin = False
+        h.addWidget(self.restore_btn, 0, Qt.AlignTop)
         h.addWidget(edit, 0, Qt.AlignTop)
+        h.addWidget(self.fill_btn, 0, Qt.AlignTop)
         h.addWidget(delete, 0, Qt.AlignTop)
         h.addWidget(close, 0, Qt.AlignTop)
         outer.addWidget(head)
+
+        self.set_fill_target("")
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -219,6 +246,69 @@ class DetailPanel(QFrame):
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self.hide()
 
+    def set_bin_mode(self, on: bool) -> None:
+        """Entries in the recycle bin: Restore instead of Edit, Fill and Delete."""
+        self._in_bin = on
+        self.restore_btn.setVisible(on)
+        self.edit_btn.setVisible(not on)
+        self.delete_btn.setVisible(not on)
+        if on:
+            self.fill_btn.hide()
+
+    def set_fill_target(self, title: str) -> None:
+        """Show which window Fill types into (a page title: drawn as plain text, never HTML)."""
+        self._fill_title = title
+        for b in self._field_fills:
+            self._tip_field_fill(b)
+        self._tip_fill()
+
+    def _tip_fill(self) -> None:
+        if self.view and not self.view.autotype.enabled:
+            tip = "Auto-Type is turned off for this entry"
+        elif self._fill_title:
+            tip = ("Fill into “%s” (Ctrl+Shift+V)" % self._fill_title).replace("<", "‹").replace(">", "›")
+        else:
+            tip = "Fill: click into a login box in another window first, then come back and press this"
+        self.fill_btn.setToolTip(tip)
+
+    def field_fill_button(self, field: str, name: str, options: list[tuple[str, str]] | None = None) -> QToolButton:
+        """The keyboard icon beside a field: types just that field into the window you came from.
+        `options` ((menu label, token), ...): with more than one, a click opens a menu of formats."""
+        b = _tool(icons.FILL, "")
+        b.setProperty("fill_name", name)
+        b.setEnabled(bool(self.view and self.view.autotype.enabled))
+        if options and len(options) > 1:
+            b.clicked.connect(lambda: self._fill_menu(b, options))
+        else:
+            token = options[0][1] if options else field
+            b.clicked.connect(lambda: self.view and self.fill_field_requested.emit(self.view, token))
+        self._field_fills.append(b)
+        self._tip_field_fill(b)
+        return b
+
+    def _fill_menu(self, button: QToolButton, options: list[tuple[str, str]]) -> None:
+        if not self.view:
+            return
+        menu = QMenu(self)
+        menu.setToolTipsVisible(False)
+        head = menu.addAction("Type it as:")
+        head.setEnabled(False)
+        for label, token in options:
+            # labels can hold a page-independent value (a phone number); QMenu draws plain text
+            act = menu.addAction(label.replace("&", "&&"))
+            act.triggered.connect(lambda _=False, t=token, v=self.view: self.fill_field_requested.emit(v, t))
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _tip_field_fill(self, b: QToolButton) -> None:
+        name = b.property("fill_name")
+        if not (self.view and self.view.autotype.enabled):
+            tip = "Auto-Type is turned off for this entry"
+        elif self._fill_title:
+            tip = (f"Type just the {name} into “{self._fill_title}”").replace("<", "‹").replace(">", "›")
+        else:
+            tip = f"Type just the {name}: click into the box in another window first, then come back and press this"
+        b.setToolTip(tip)
+
     # ---- content ------------------------------------------------------------
     def show_entry(self, view: EntryView, pixmap: QPixmap | None) -> None:
         self.view = view
@@ -228,8 +318,13 @@ class DetailPanel(QFrame):
                 w.deleteLater()
         self._avatar_slot.addWidget(Avatar(view.title or view.url or "?", size=40, pixmap=pixmap), 0, Qt.AlignTop)
         self.title.setText(view.title or "(untitled)")
+        self.fill_btn.setEnabled(view.autotype.enabled)
+        # a profile has no login to type: its fields have their own keyboard icons
+        self.fill_btn.setVisible(not self._in_bin and (not view.is_identity or bool(view.username or view.password)))
+        self._tip_fill()
         self.folder.setText(view.group or "Top level")
 
+        self._field_fills = []
         body = QWidget()
         lay = QVBoxLayout(body)
         lay.setContentsMargins(14, 0, 14, 16)
@@ -237,17 +332,24 @@ class DetailPanel(QFrame):
 
         login = []
         card = view.is_card
+        ident = view.is_identity
+        if ident:
+            self._identity_fields(view, lay)
         if card and view.card_number:
-            login.append(_Field("Card number", view.card_number, self, secret=True, mono=True))
+            login.append(_Field("Card number", view.card_number, self, secret=True, mono=True,
+                                fill_options=idlib.fill_options(view, "card_number")))
         if view.username and not (card and view.username == view.card_number):
-            login.append(_Field("Username", view.username, self))
+            login.append(_Field("Username", view.username, self, fill="" if card else "username"))
         if view.password:
-            login.append(_Field("Password", view.password, self, secret=True, mono=True))
+            login.append(_Field("Password", view.password, self, secret=True, mono=True,
+                                fill="" if card else "password"))
         exp = view.card_expiry if card else None
         if exp:  # shown MM/YY, copied as MMYY (how card forms ask for it)
-            login.append(_Field("Expiry", f"{exp[0]}/{exp[1]}", self, mono=True, copy_value=f"{exp[0]}{exp[1]}"))
+            login.append(_Field("Expiry", f"{exp[0]}/{exp[1]}", self, mono=True, copy_value=f"{exp[0]}{exp[1]}",
+                                fill_options=idlib.fill_options(view, "card_expiry")))
         if card and view.card_code:
-            login.append(_Field("Card code", view.card_code, self, secret=True, mono=True))
+            login.append(_Field("Card code", view.card_code, self, secret=True, mono=True,
+                                fill_options=idlib.fill_options(view, "card_code")))
         self._otp = _OtpField(view, self) if view.totp else None
         if self._otp:
             login.append(self._otp)
@@ -265,7 +367,8 @@ class DetailPanel(QFrame):
         if card and (view.card_holder or view.card_brand):
             extra = []
             if view.card_holder:
-                extra.append(_Field("Cardholder", view.card_holder, self))
+                extra.append(_Field("Cardholder", view.card_holder, self,
+                                    fill_options=idlib.fill_options(view, "card_holder")))
             if view.card_brand:
                 extra.append(_Field("Brand", view.card_brand, self))
             lay.addWidget(_group_box(extra))
@@ -274,6 +377,8 @@ class DetailPanel(QFrame):
             hidden |= set(CARD_SLOT_KEYS) | {LEGACY_CODE_KEY}
             if exp:
                 hidden.add(LEGACY_EXPIRY_KEY)
+        if ident:
+            hidden |= set(idlib.KEYS)
         custom = [f for f in view.custom if f.key not in hidden]
         if custom:
             lay.addWidget(_group_box([
@@ -305,6 +410,30 @@ class DetailPanel(QFrame):
             self._timer.start()
         else:
             self._timer.stop()
+
+    def _identity_fields(self, view: EntryView, lay: QVBoxLayout) -> None:
+        """A sign-up profile: each field with a keyboard icon (a menu where it has several formats)."""
+        def field(key: str, label: str | None = None, fill: str | None = None) -> _Field | None:
+            value = view.get_field(key)
+            if not value.strip():
+                return None
+            secret = key in idlib.PROTECTED
+            return _Field(label or idlib.LABELS[key], value, self, secret=secret, mono=secret,
+                          fill_options=idlib.fill_options(view, fill or key))
+
+        groups = [
+            [field(idlib.FIRST), field(idlib.LAST)],
+            [field(idlib.EMAIL), field(idlib.PHONE), field(idlib.BIRTH), field(idlib.GENDER)],
+            [field(idlib.ADDRESS), field(idlib.CITY), field(idlib.STATE), field(idlib.POSTAL), field(idlib.COUNTRY)],
+        ]
+        first, last = view.get_field(idlib.FIRST).strip(), view.get_field(idlib.LAST).strip()
+        if first and last:  # for forms with one "Full name" box
+            groups[0].append(_Field("Full name", f"{first} {last}", self,
+                                    fill_options=idlib.fill_options(view, "name")))
+        for g in groups:
+            shown = [w for w in g if w is not None]
+            if shown:
+                lay.addWidget(_group_box(shown))
 
     # ---- open / close -----------------------------------------------------------
     def open_at(self, target: QPoint, animate: bool) -> None:
