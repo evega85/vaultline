@@ -35,6 +35,9 @@ def pytest_unconfigure(config):
     sys.stderr.flush()
     if sys.platform == "win32":
         import ctypes
-        k32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32")  # own copy, so these types don't leak into other ctypes users
+        k32.GetCurrentProcess.restype = wintypes.HANDLE  # untyped, the -1 pseudo-handle is cut to 32 bits
+        k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
         k32.TerminateProcess(k32.GetCurrentProcess(), _exit_status)
     os._exit(_exit_status)
