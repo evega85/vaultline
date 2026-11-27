@@ -15,8 +15,9 @@ def qapp():
     return QApplication.instance() or QApplication(sys.argv)
 
 
-# On CI the runner sometimes reports exit code 1 after every test passed: something crashes while
-# Python and Qt shut down. There, end the process with pytest's own result once it has printed it.
+# On CI the test process crashes (access violation) while Qt's DLLs unload, after every test has
+# passed, so the step fails. There, once pytest has printed its result, end the process with that
+# result straight away. TerminateProcess skips DLL unloading; os._exit doesn't.
 _exit_status = None
 
 
@@ -27,8 +28,13 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config):
-    if os.environ.get("CI") and _exit_status is not None:
-        print(f"pytest session status: {_exit_status}")
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(_exit_status)
+    if not os.environ.get("CI") or _exit_status is None:
+        return
+    print(f"pytest session status: {_exit_status}")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.TerminateProcess(k32.GetCurrentProcess(), _exit_status)
+    os._exit(_exit_status)
