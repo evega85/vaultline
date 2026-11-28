@@ -217,3 +217,30 @@ def test_panel_pulled_narrow_closes_to_icon(setup, edge):
     _drag(win, MIN_WIDTH - EDGE_SWITCH - 1, edge)
     assert wait_for(app, lambda: not win.isVisible(), 2)
     assert win.icon_mode and win.config.compact_width == width
+
+
+def test_rescaled_while_hidden_stays_the_icon(setup, monkeypatch):
+    """Monitors asleep: Windows moved the hidden panel to a screen with other scaling, so its
+    width grew past the palette's. Not the user's doing: it stays the icon, at the palette width."""
+    app, win, vc, clip, db = setup
+    unlock(app, win, vc)
+    win.resize(560, 300)
+    win.enter_icon_mode()
+    win.open_panel()  # (Qt holds back a hidden window's resizes; Windows' own reach it either way)
+    app.processEvents()
+    monkeypatch.setattr(win, "_user_resizing", lambda: False)
+    win.resize(896, win.height())  # 560 at 200% counted at 125%
+    app.processEvents()
+    wait_for(app, lambda: win.width() == 560, 2)
+    assert win.icon_mode and win.compact and win.width() == 560 and cfgmod.Config.load().icon_mode
+    win.collapse_panel()
+    vc.lock("Locked after inactivity.")
+    app.processEvents()
+    win._collapsed_at = 0
+    win._icon_clicked()                      # the icon still opens its panel
+    assert win.isVisible() and win.compact and win.icon_mode
+
+    monkeypatch.setattr(win, "_user_resizing", lambda: True)
+    win.resize(800, win.height())            # the user pulling it wider still makes a normal window
+    app.processEvents()
+    assert not win.icon_mode and not win.compact

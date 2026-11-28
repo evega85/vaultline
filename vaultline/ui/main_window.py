@@ -241,9 +241,14 @@ class MainWindow(QMainWindow):
         if on and normal and self.height() >= FULL_MIN_HEIGHT:
             self.config.full_height = self.height()  # brought back when the window is widened again
             self.config.save()
-        self.compact = on
         if not on and getattr(self, "icon_mode", False):
+            if not self._user_resizing():
+                # Not the user: Windows moved the hidden panel to a screen with other scaling (the
+                # monitors slept) and its pixels now count as more. Stay the icon's palette.
+                QTimer.singleShot(0, self._back_to_palette_width)
+                return
             self._drop_icon_mode()  # pulled wider than the palette: a normal window again
+        self.compact = on
         self.titlebar.set_compact(on)
         self.vault_view.set_compact(on)
         self.frame.set_maximizable(not on)  # the palette snaps to the screen top instead of maximising
@@ -254,6 +259,14 @@ class MainWindow(QMainWindow):
             self._fit_height()
         elif normal and self.height() < FULL_MIN_HEIGHT:
             self.resize(self.width(), self._full_height())
+
+    def _user_resizing(self) -> bool:
+        """Is the user dragging the window's edge? (Without our own frame Qt resizes it: assume so.)"""
+        return self.frame.sizing if self.frame.enabled else True
+
+    def _back_to_palette_width(self) -> None:
+        if self.icon_mode and self.width() >= COMPACT_WIDTH:
+            self.resize(self._compact_width(), self.height())
 
     def _full_height(self) -> int:
         return max(self.config.full_height or FULL_DEFAULT_HEIGHT, FULL_MIN_HEIGHT)

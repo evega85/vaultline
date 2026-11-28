@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QWidget
 WM_SIZING = 0x0214
 WM_MOVING = 0x0216
 WM_ENTERSIZEMOVE = 0x0231
+WM_EXITSIZEMOVE = 0x0232
 WM_NCCALCSIZE = 0x0083
 WM_NCHITTEST = 0x0084
 WM_NCMOUSEMOVE = 0x00A0
@@ -107,6 +108,7 @@ class NativeFrame:
         self.bottom_resize = False     # with vertical_resize False: still allow the bottom edge
         self.enabled = available()
         self.wanted_width = None       # while a side edge is dragged: the width the mouse asks for
+        self.sizing = False            # the user is moving or resizing the window right now
         self._max_pressed = False
         self._hwnd = 0
 
@@ -184,9 +186,13 @@ class NativeFrame:
                 self._calc_size(msg.lParam)
             return True, 0
         if m == WM_ENTERSIZEMOVE:
+            self.sizing = True
             self._start_drag()
             if self.size_move_started is not None:
                 self.size_move_started()
+            return None
+        if m == WM_EXITSIZEMOVE:
+            self.sizing = False
             return None
         if m == WM_MOVING and self.snap_to_top:
             self._snap_top(msg.lParam)
