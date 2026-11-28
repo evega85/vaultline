@@ -10,7 +10,7 @@ from .. import icons, identity as idlib, passgen
 from ..vault import EntryEdit, EntryView, GroupView
 from .entry_dialog import _Section, _small_tool
 from .folder_picker import FolderPicker
-from .widgets import mark_shared_folders
+from .widgets import ErrorLabel, mark_shared_folders
 
 PASSWORD_LENGTH = 20
 
@@ -101,9 +101,7 @@ class NewLoginDialog(QDialog):
         self.url.setPlaceholderText("https:// (optional: copy it from the address bar)")
         lay.addWidget(_Section("URL", self.url))
 
-        self.error = QLabel()
-        self.error.setObjectName("Error")
-        self.error.setWordWrap(True)
+        self.error = ErrorLabel()
         self.error.hide()
         lay.addWidget(self.error)
         btns = QHBoxLayout()

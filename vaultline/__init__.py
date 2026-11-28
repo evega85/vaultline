@@ -3,7 +3,7 @@ import getpass
 import os
 
 APP_NAME = "Vaultline"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 
 def pipe_name(kind: str) -> str:

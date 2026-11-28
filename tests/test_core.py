@@ -173,6 +173,47 @@ def test_backups_are_rotated(db, tmp_path):
     assert len(list((tmp_path / "backups").glob("*.kdbx"))) == 3
 
 
+def test_save_repairs_a_rename_the_drive_lost(db, tmp_path, monkeypatch):
+    # rclone's VFS (1.76) leaves an empty file when a temp file is renamed over a cloud file
+    import os
+    import vaultline.vault as vaultmod
+
+    real_replace = os.replace
+
+    def lossy_replace(src, dst):
+        real_replace(src, dst)
+        Path(dst).write_bytes(b"")
+
+    monkeypatch.setattr(vaultmod.os, "replace", lossy_replace)
+    v = make_vault(db, tmp_path)
+    v.open()
+    v.save_entry(new("Bank"))
+    kp = PyKeePass(str(db), password=PW)
+    assert kp.find_entries(title="Bank", first=True) is not None
+    assert [p.name for p in db.parent.iterdir()] == ["vault.kdbx"]
+
+
+def test_save_fails_loudly_when_the_drive_keeps_losing_it(db, tmp_path, monkeypatch):
+    import vaultline.vault as vaultmod
+    from vaultline.vault import VaultError
+
+    v = make_vault(db, tmp_path)
+    v.open()
+    monkeypatch.setattr(vaultmod.Vault, "_written_ok", lambda self, data: False)
+    with pytest.raises(VaultError, match="did not save correctly"):
+        v.save_entry(new("Bank"))
+    assert len(list((tmp_path / "backups").glob("*.kdbx"))) == 1
+
+
+def test_empty_database_file_names_the_backup(db, tmp_path):
+    v = make_vault(db, tmp_path)
+    v.open()
+    v.save_entry(new("Bank"))
+    db.write_bytes(b"")
+    with pytest.raises(FileUnreadable, match="empty.*backups"):
+        make_vault(db, tmp_path).open()
+
+
 def test_recycle_bin_entries_hidden(db, tmp_path):
     kp = PyKeePass(str(db), password=PW)
     e = kp.add_entry(kp.root_group, "Trash me", "", "")
@@ -305,3 +346,25 @@ def test_generator_settings_and_the_old_length(tmp_path, monkeypatch):
     c.pw_symbols, c.pw_upper, c.pw_length = False, False, 10
     pw = passgen.from_config(c)
     assert len(pw) == 10 and all(ch in passgen.LOWER + passgen.DIGITS for ch in pw)
+
+
+def test_error_messages_wrap_and_copy_in_full(qapp):
+    from PySide6.QtWidgets import QApplication, QWidget
+    from vaultline.ui.toast import Toast
+    from vaultline.ui.widgets import ErrorLabel
+    msg = r"The database file is empty. The latest backup is D:\Example\Vaultline\backups\Some.Long-Name.kdbx"
+    err = ErrorLabel(center=True)
+    err.setText(msg)
+    assert err.text() == msg and err.label.wordWrap()
+    err.copy_btn.click()
+    assert QApplication.clipboard().text() == msg and err.copy_btn.text().strip() == "Copied"
+
+    host = QWidget()
+    host.resize(400, 300)
+    toast = Toast(host)
+    toast.show_message("Not saved", msg, "error")
+    assert toast.copy_btn.isVisibleTo(toast) and toast.width() <= 400 - 32
+    toast.copy_btn.click()
+    assert QApplication.clipboard().text() == f"Not saved: {msg}"
+    toast.show_message("Copied", "password", "ok")  # ordinary notices: no button, clicks pass through
+    assert not toast.copy_btn.isVisibleTo(toast)

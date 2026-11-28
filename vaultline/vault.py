@@ -12,6 +12,8 @@ How saves stay safe with Google Drive / KeePassium:
 4. The new bytes go to a temporary file in the same folder, are flushed to disk,
    and then swapped in with one atomic rename (os.replace). Drive never sees a
    half-written .kdbx. A brief sharing lock by the sync client is retried.
+   The file is then read back; if a drive mount lost the rename (rclone does),
+   the bytes are written over it directly and checked again.
 
 Custom icons are stored the way KeePassXC stores them (Meta/CustomIcons + the
 entry's CustomIconUUID), so KeePassium and KeePassXC show them too.
@@ -628,6 +630,11 @@ class Vault:
 
     def open(self) -> Snapshot:
         data = self._read_disk()
+        if not data:
+            backups = sorted(self._backup_dir.glob(f"{self.path.stem}.*.kdbx"))
+            hint = (f" The latest backup is {backups[-1]}: copy it over the database file to restore it."
+                    if backups else "")
+            raise FileUnreadable("The database file is empty (0 bytes)." + hint)
         self._kp = self._parse(data)
         self._sha = _sha(data)
         return self.snapshot()
@@ -1296,15 +1303,34 @@ class Vault:
         for _ in range(40):  # up to ~10 s while the sync client holds the file
             try:
                 os.replace(tmp, self.path)
-                return
+                break
             except PermissionError as exc:
                 last_err = exc
                 time.sleep(0.25)
+        else:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise VaultError(f"Could not replace the database file (locked by another program?): {last_err}")
+        if self._written_ok(data):
+            return
+        # Some drive mounts lose the rename: rclone 1.76 (VFS cache) leaves an EMPTY file when a
+        # temp file is renamed over one that came from the cloud (seen 2026-11-27). The backup is
+        # already taken, so write the bytes over it directly.
+        with open(self.path, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if not self._written_ok(data):
+            raise VaultError("The database file did not save correctly on this drive. Your last good copy "
+                             f"is in {self._backup_dir}")
+
+    def _written_ok(self, data: bytes) -> bool:
         try:
-            tmp.unlink()
+            return self.path.read_bytes() == data
         except OSError:
-            pass
-        raise VaultError(f"Could not replace the database file (locked by another program?): {last_err}")
+            return False
 
     def check_password(self, password: str) -> bool:
         return bool(self._password) and password == self._password

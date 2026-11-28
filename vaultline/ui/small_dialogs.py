@@ -6,6 +6,7 @@ from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from .. import pin as pinlib
+from .widgets import ErrorLabel
 
 
 class _Base(QDialog):
@@ -29,9 +30,7 @@ class _Base(QDialog):
         self.body = QVBoxLayout()
         self.body.setSpacing(8)
         self.lay.addLayout(self.body)
-        self.error = QLabel()
-        self.error.setObjectName("Error")
-        self.error.setWordWrap(True)
+        self.error = ErrorLabel()
         self.error.hide()
         self.lay.addWidget(self.error)
 

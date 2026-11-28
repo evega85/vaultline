@@ -224,3 +224,53 @@ class WheelGuard(QObject):
                 QApplication.sendEvent(bar, ev)
             return True
         return False
+
+
+def breakable(text: str) -> str:
+    """Let a long path or name wrap: a zero-width space after slashes . _ - (for display only)."""
+    return "".join(ch + "​" if ch in r"\/._-" else ch for ch in text)
+
+
+class ErrorLabel(QWidget):
+    """An error message that wraps (long paths too), can be selected, and has a Copy button,
+    so nothing is cut off where it can't be read. setText/text work like QLabel's."""
+
+    def __init__(self, text: str = "", center: bool = False):
+        super().__init__()
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+        from .. import icons
+        lay = QVBoxLayout(self) if center else QHBoxLayout(self)  # centred: Copy goes underneath
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2 if center else 6)
+        self._text = ""
+        self.label = QLabel()
+        self.label.setObjectName("Error")
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(Qt.PlainText)
+        self.label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        if center:
+            self.label.setAlignment(Qt.AlignCenter)
+        self.copy_btn = QPushButton()
+        self.copy_btn.setObjectName("Ghost")
+        self.copy_btn.setIcon(icons.glyph(icons.COPY, theme.TEXT_2, 13))
+        self.copy_btn.setText(" Copy")
+        self.copy_btn.setToolTip("Copy this message")
+        self.copy_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_btn.setFocusPolicy(Qt.NoFocus)
+        self.copy_btn.clicked.connect(self._copy)
+        lay.addWidget(self.label, 1)
+        lay.addWidget(self.copy_btn, 0, Qt.AlignHCenter if center else Qt.AlignTop)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        self._text = text or ""
+        self.label.setText(breakable(self._text))
+        self.copy_btn.setText(" Copy")
+
+    def text(self) -> str:
+        return self._text
+
+    def _copy(self) -> None:
+        QApplication.clipboard().setText(self._text)  # an error message, never a secret value
+        self.copy_btn.setText(" Copied")

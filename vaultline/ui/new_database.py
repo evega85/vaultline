@@ -8,6 +8,7 @@ from PySide6.QtCore import QStandardPaths, Qt
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QVBoxLayout)
 
+from .widgets import ErrorLabel
 from .. import bitwarden, icons, theme
 
 MIN_LENGTH = 8
@@ -91,9 +92,7 @@ class NewDatabaseDialog(QDialog):
         lay.addWidget(self.delete_export)
         self.items: list = []  # filled on Create, after the export is read (and decrypted)
 
-        self.error = QLabel()
-        self.error.setObjectName("Error")
-        self.error.setWordWrap(True)
+        self.error = ErrorLabel()
         self.error.hide()
         lay.addWidget(self.error)
 

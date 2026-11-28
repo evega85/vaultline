@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMen
 
 from .. import APP_NAME, icons, theme
 from .new_database import NewDatabaseDialog
-from .widgets import ElidedLabel
+from .widgets import ErrorLabel, ElidedLabel
 
 
 def recent_choices(recent: list, current: str = "") -> list[dict]:
@@ -108,10 +108,7 @@ class UnlockView(QWidget):
             self._eye.setIcon(icons.glyph(icons.EYE_OFF if on else icons.EYE, theme.TEXT_2, 16))))
         lay.addWidget(self.password)
 
-        self.error = QLabel()
-        self.error.setObjectName("Error")
-        self.error.setWordWrap(True)
-        self.error.setAlignment(Qt.AlignCenter)
+        self.error = ErrorLabel(center=True)
         self.error.hide()
         lay.addWidget(self.error)
 

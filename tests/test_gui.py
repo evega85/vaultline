@@ -1123,14 +1123,25 @@ def test_generated_password_is_copied(setup, monkeypatch):
 
     def generate(dlg):
         dlg.show()
-        dlg._generate()
-        seen["pw"], seen["note"] = dlg.password.text(), dlg.pw_copied.isVisible() and dlg.pw_copied.text()
-        seen["clip"] = QGuiApplication.clipboard().text()
+        QGuiApplication.clipboard().setText("before")
+        dlg.gen_btn.click()  # generates; the button turns into Copy
+        seen["pw"] = dlg.password.text()
+        seen["tip"], seen["clip0"] = dlg.gen_btn.toolTip(), QGuiApplication.clipboard().text()
+        dlg.gen_btn.click()  # copies; back to Generate
+        seen["note"] = dlg.pw_copied.isVisible() and dlg.pw_copied.text()
+        seen["clip"], seen["tip2"] = QGuiApplication.clipboard().text(), dlg.gen_btn.toolTip()
+        seen["same"] = dlg.password.text() == seen["pw"]
+        dlg.gen_btn.click()  # generates a new one
+        seen["new"] = dlg.password.text() != seen["pw"]
+        QTest.keyClicks(dlg.password, "x")  # typing turns Copy back into Generate
+        seen["tip3"] = dlg.gen_btn.toolTip()
         return 0
 
     edit_with(monkeypatch, generate)
     win.vault_view.add_btn.click()
-    assert len(seen["pw"]) == 20 and seen["clip"] == seen["pw"]
+    assert len(seen["pw"]) == 20 and seen["clip0"] == "before" and seen["tip"] == "Copy the new password"
+    assert seen["clip"] == seen["pw"] and seen["same"] and seen["new"]
+    assert seen["tip2"] == seen["tip3"] == "Generate a strong password"
     assert seen["note"] == f"Copied. The clipboard clears in {clip.clear_seconds} s."
 
 

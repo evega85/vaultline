@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCompleter, QDialog, QFrame, QHBoxL
 
 from .. import icons, identity as idlib, otp as otplib, passgen, theme
 from .folder_picker import FolderPicker
-from .widgets import mark_shared_folders
+from .widgets import ErrorLabel, mark_shared_folders
 from ..vault import (CARD_BRAND_KEY, CARD_CODE_KEY, CARD_LOCAL_PHONE_KEY, CARD_PHONE_KEY, CARD_HOLDER_KEY, CARD_MONTH_KEY, CARD_NUMBER_KEY,
                       CARD_SLOT_KEYS, CARD_YEAR_KEY, LEGACY_CODE_KEY, LEGACY_EXPIRY_KEY, CustomField,
                       EntryEdit, EntryView, GroupView, expiry_from_parts, is_internal_field, is_url_field, parse_expiry)
@@ -339,9 +339,11 @@ class EntryDialog(QDialog):
         self._eye = _small_tool(icons.EYE, "Show / hide")
         self._eye.setCheckable(True)
         self._eye.toggled.connect(self._toggle_pw)
-        gen = _small_tool(icons.DICE, "Generate a strong password (and copy it)" if copy_secret
-                          else "Generate a strong password")
-        gen.clicked.connect(self._generate)
+        # Generate; after a password is made it turns into Copy, and back to Generate once clicked
+        self.gen_btn = gen = _small_tool(icons.DICE, "Generate a strong password")
+        self._generated = ""  # the password Copy would copy; "" = the button generates
+        gen.clicked.connect(self._gen_clicked)
+        self.password.textEdited.connect(lambda _t: self._set_gen_mode(""))
         pw_row.addWidget(self.password, 1)
         pw_row.addWidget(self._eye)
         pw_row.addWidget(gen)
@@ -532,9 +534,7 @@ class EntryDialog(QDialog):
         foot_w = QWidget()
         foot = QVBoxLayout(foot_w)
         foot.setContentsMargins(24, 8, 24, 18)
-        self.error = QLabel(error)
-        self.error.setObjectName("Error")
-        self.error.setWordWrap(True)
+        self.error = ErrorLabel(error)
         self.error.setVisible(bool(error))
         foot.addWidget(self.error)
         btns = QHBoxLayout()
@@ -742,11 +742,27 @@ class EntryDialog(QDialog):
     def _generate(self) -> None:
         self.password.setText(self._new_password())
         self._eye.setChecked(True)
-        if self._copy_secret is not None:  # ready to paste into the site's "new password" box
-            seconds = self._copy_secret(self.password.text())
-            self.pw_copied.setText(f"Copied. The clipboard clears in {seconds} s.")
-            self.pw_copied.show()
-            self._pw_copied_timer.start()
+        if self._copy_secret is not None:  # next click copies it for the site's "new password" box
+            self._set_gen_mode(self.password.text())
+
+    def _gen_clicked(self) -> None:
+        if self._generated and self._generated == self.password.text():
+            self._copy_generated()
+        else:
+            self._generate()
+
+    def _copy_generated(self) -> None:
+        seconds = self._copy_secret(self.password.text())
+        self.pw_copied.setText(f"Copied. The clipboard clears in {seconds} s.")
+        self.pw_copied.show()
+        self._pw_copied_timer.start()
+        self._set_gen_mode("")
+
+    def _set_gen_mode(self, generated: str) -> None:
+        self._generated = generated
+        copy = bool(generated)
+        self.gen_btn.setIcon(icons.glyph(icons.COPY if copy else icons.DICE, theme.TEXT_2, 15))
+        self.gen_btn.setToolTip("Copy the new password" if copy else "Generate a strong password")
 
     def _check_otp(self) -> bool:
         text = self.otp.text().strip()

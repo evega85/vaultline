@@ -7,7 +7,7 @@ from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from .. import icons
-from .widgets import ElidedLabel
+from .widgets import ErrorLabel, ElidedLabel
 
 
 class PinView(QWidget):
@@ -54,10 +54,7 @@ class PinView(QWidget):
         self.pin.returnPressed.connect(self._submit)
         lay.addWidget(self.pin)
 
-        self.error = QLabel()
-        self.error.setObjectName("Error")
-        self.error.setAlignment(Qt.AlignCenter)
-        self.error.setWordWrap(True)
+        self.error = ErrorLabel(center=True)
         self.error.hide()
         lay.addWidget(self.error)
 
