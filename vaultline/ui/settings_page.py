@@ -11,7 +11,7 @@ from PySide6.QtGui import QDesktopServices, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QMenu, QPushButton,
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
-from .. import autostart, hotkey, icons, theme
+from .. import autostart, hotkey, icons, passgen, theme
 from .widgets import mark_shared_folders
 from ..agent_access import folder_pass_minutes
 from ..config import BACKUP_DIR, Config
@@ -66,8 +66,13 @@ class SettingsPage(QWidget):
     done = Signal()                  # back arrow / Esc: MainWindow saves and returns to the list
     open_database = Signal(str, str)  # path, keyfile ("" path = browse for one)
     close_database = Signal()
+    create_shared = Signal()         # make a new shared vault and open it with this one
+    add_shared = Signal()            # open an existing one with this one
+    detach_shared = Signal(str)      # VaultInfo key
+    manage_shared = Signal(str, bool)  # AutoOpen entry uuid, on
 
-    def __init__(self, config: Config, db_path: str, groups=(), profiles=(), shared: set[str] | None = None):
+    def __init__(self, config: Config, db_path: str, groups=(), profiles=(), shared: set[str] | None = None,
+                 vaults=()):
         super().__init__()
         self.config = config
         self._db_path = db_path
@@ -214,11 +219,36 @@ class SettingsPage(QWidget):
         self.newlogin_folder.setCurrentIndex(i if i >= 0 else 0)
         mark_shared_folders(self.newlogin_folder, shared)
         lay.addLayout(_row(QLabel("Save them in"), self.newlogin_folder))
-        self.newlogin_length = QSpinBox()
-        self.newlogin_length.setRange(12, 64)
-        self.newlogin_length.setValue(max(12, min(64, config.newlogin_length or 20)))
-        self.newlogin_length.setSuffix(" characters")
-        lay.addLayout(_row(QLabel("Password length"), self.newlogin_length))
+        root.addWidget(box)
+
+        # password generator: set once, used by Generate in the form and by New login
+        box, lay = _section("PASSWORD GENERATOR")
+        self.pw_length = QSpinBox()
+        self.pw_length.setRange(passgen.MIN_LENGTH, passgen.MAX_LENGTH)
+        self.pw_length.setValue(max(passgen.MIN_LENGTH, min(passgen.MAX_LENGTH, config.pw_length or 20)))
+        self.pw_length.setFixedWidth(80)
+        lay.addLayout(_row(QLabel("Length (characters)"), self.pw_length))
+        self.pw_sets = []
+        sets = QHBoxLayout()
+        sets.setSpacing(18)
+        for text, attr in (("A–Z", "pw_upper"), ("a–z", "pw_lower"), ("0–9", "pw_digits"),
+                           ("Symbols  ! # $ %", "pw_symbols")):
+            cb = QCheckBox(text)
+            cb.setChecked(getattr(config, attr))
+            cb.setProperty("attr", attr)
+            cb.toggled.connect(lambda on, b=cb: self._pw_set_toggled(b, on))
+            sets.addWidget(cb)
+            self.pw_sets.append(cb)
+        sets.addStretch()
+        lay.addLayout(sets)
+        self.pw_example = QLabel()
+        self.pw_example.setStyleSheet(f"font-family: Consolas, monospace; color: {theme.TEXT_2};")
+        self.pw_example.setTextInteractionFlags(Qt.NoTextInteraction)
+        lay.addWidget(self.pw_example)
+        self.pw_length.valueChanged.connect(self._pw_example)
+        self._pw_example()
+        lay.addWidget(_hint("Used every time you press Generate in an entry, and for new logins. If a site "
+                            "wants something different, type over the generated password."))
         root.addWidget(box)
 
         # starting and closing
@@ -324,6 +354,40 @@ class SettingsPage(QWidget):
         lay.addLayout(_row(self.open_other, self.close_db, backups, stretch_after=2))
         root.addWidget(box)
 
+        # shared vaults (AutoOpen)
+        box, lay = _section("SHARED VAULTS")
+        lay.addWidget(_hint("Other databases that open with this one, e.g. passwords you share with someone "
+                            "through a shared Google Drive folder. Each shows as a folder in the list. "
+                            "KeePassXC opens them too (AutoOpen); on a phone, open them separately."))
+        for v in vaults:
+            state = f"didn't open: {v.error}" if v.error and not v.root_uuid else ("open" if v.root_uuid else "opening…")
+            label = QLabel(f"{v.name}  ·  {state}\n{v.path}")
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(True)
+            label.setObjectName("Sub")
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            detach = QPushButton("Stop opening")
+            detach.setObjectName("Ghost")
+            detach.setToolTip("Delete its AutoOpen entry from this database. The shared file itself is kept.")
+            detach.clicked.connect(lambda _=False, k=v.key: self.detach_shared.emit(k))
+            row = QHBoxLayout()
+            row.addWidget(label, 1)
+            row.addWidget(detach, 0, Qt.AlignTop)
+            lay.addLayout(row)
+            manage = QCheckBox("I manage it: share entries into it from this database")
+            manage.setToolTip("This database stays the master copy. Entries and folders you share are kept in "
+                              "step there; changes others make wait for your review. Leave it off on the "
+                              "other person's computer.")
+            manage.setChecked(v.managed)
+            manage.toggled.connect(lambda on, u=v.entry_uuid: self.manage_shared.emit(u, on))
+            lay.addWidget(manage)
+        self.create_shared_btn = QPushButton("Create a shared vault…")
+        self.create_shared_btn.clicked.connect(self.create_shared)
+        self.add_shared_btn = QPushButton("Open an existing one with this…")
+        self.add_shared_btn.clicked.connect(self.add_shared)
+        lay.addLayout(_row(self.create_shared_btn, self.add_shared_btn, stretch_after=1))
+        root.addWidget(box)
+
         root.addStretch()
 
     def _sync_share(self, *_):
@@ -383,6 +447,17 @@ class SettingsPage(QWidget):
         else:
             super().keyPressEvent(e)
 
+    def _pw_set_toggled(self, box: QCheckBox, on: bool) -> None:
+        if not on and not any(b.isChecked() for b in self.pw_sets):
+            box.setChecked(True)  # at least one kind of character
+            return
+        self._pw_example()
+
+    def _pw_example(self, *_args) -> None:
+        on = {b.property("attr"): b.isChecked() for b in self.pw_sets}
+        self.pw_example.setText("Example:  " + passgen.generate(self.pw_length.value(), on["pw_upper"],
+                                                               on["pw_lower"], on["pw_digits"], on["pw_symbols"]))
+
     def save(self) -> None:
         c = self.config
         c.auto_lock_enabled = self.auto.isChecked()
@@ -402,7 +477,9 @@ class SettingsPage(QWidget):
             c.newlogin_hotkey = self.newlogin_text()
         c.default_profile_uuid = self.profile.currentData() or ""
         c.newlogin_folder_uuid = self.newlogin_folder.currentData() or ""
-        c.newlogin_length = self.newlogin_length.value()
+        c.pw_length = self.pw_length.value()
+        for cb in self.pw_sets:
+            setattr(c, cb.property("attr"), cb.isChecked())
         folder = self.folder.currentData() or ""
         c.agent_share_enabled = bool(self.share.isChecked() and folder)
         c.agent_folder_uuid = folder if c.agent_share_enabled else ""

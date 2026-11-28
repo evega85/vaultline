@@ -20,7 +20,7 @@ from PySide6.QtGui import QCursor, QGuiApplication, QKeyEvent
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QPushButton, QVBoxLayout, QWidget)
 
-from .. import identity as idlib, otp as otplib, sendkeys, theme
+from .. import identity as idlib, otp as otplib, passgen, sendkeys, theme
 from ..config import DATA_DIR
 from ..autotype import (VK_TAB, Match, SequenceError, Step, build, find_matches, is_browser_title, is_signup_title,
                         site_from_title, site_url, window_matches)
@@ -465,8 +465,8 @@ class AutoTypeFlow(QObject):
         profiles = sorted((v for v in snap.entries if v.is_identity), key=lambda v: (v.title or "").casefold())
         self.win.bring_to_front()
         dlg = NewLoginDialog(self.win, title, site_from_title(title), profiles, c.default_profile_uuid,
-                             snap.groups, snap.root_uuid, c.newlogin_folder_uuid, c.newlogin_length,
-                             shared=self.win.shared_folders(), url=url)
+                             snap.groups, snap.root_uuid, c.newlogin_folder_uuid, lambda: passgen.from_config(c),
+                             shared=self.win.shared_folders(), url=url, generator_config=c)
         if self.win.compact:
             self.win._fit_to_compact(dlg)
         accepted = self.win._run_dialog(dlg)

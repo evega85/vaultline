@@ -52,6 +52,41 @@ SECTIONS: list[tuple[str, list[str]]] = [
         "3.  To fill passwords in apps, pick KeePassDX as the autofill service in Android Settings "
         "(search Settings for “Autofill”).",
     ]),
+    ("SHARING PASSWORDS 1: MAKE A SHARED VAULT (ON YOUR PC)", [
+        "Make one shared vault per person or group (for example one for each designer). Your own vault "
+        "stays the master copy; each shared vault only holds what you share with it.",
+        "1.  In Google Drive (G:), make a new folder just for this person, for example "
+        "“Shared with Sam”. Nothing else goes in it, and never your own vault file.",
+        "2.  In Vaultline: Settings > Shared vaults > Create a shared vault. Save it in that folder and "
+        "name it after the person (Sam.kdbx). Leave the suggested name in the folder list as it is.",
+        "3.  Vaultline makes a long random password for it and keeps it in your AutoOpen folder, so "
+        "your own master password opens both. You never have to type it.",
+        "4.  On drive.google.com, share that folder (only that folder) with the person's Google account.",
+    ]),
+    ("SHARING PASSWORDS 2: SET UP THE OTHER PERSON'S PC (ONCE)", [
+        "1.  Get the password: in your vault, open the AutoOpen folder, open the entry with the vault's "
+        "name and copy its password. Best pasted on their PC yourself; if you send it, don't send the "
+        "Drive link in the same message.",
+        "2.  On their PC, open drive.google.com > Shared with me. Right-click the folder > Organize > "
+        "Add shortcut, to their own Drive. (Shared folders don't show in File Explorer until you do "
+        "this.) After a minute it appears under Google Drive in File Explorer (G:).",
+        "3.  In their Vaultline: Settings > Shared vaults > Open existing. Pick the .kdbx in that folder, "
+        "paste the password. Leave “I manage it” unticked: only your PC keeps the copies up to date.",
+        "4.  From now on the shared vault opens whenever they unlock their own vault. They can also open "
+        "it in KeePassXC, or KeePassium on a phone, with the same password.",
+    ]),
+    ("SHARING PASSWORDS 3: DAY TO DAY", [
+        "Share one login: right-click it > Share with… and tick one or more vaults. The copy arrives in a "
+        "few seconds and the row says who it's shared with.",
+        "Share a folder: point at the folder in the folder list, press the share icon and tick the "
+        "vaults. Logins you add to that folder later are shared too.",
+        "Stop sharing: Share with… again and untick. Their copy goes to their vault's recycle bin. "
+        "Deleting the login in your vault removes the copies too.",
+        "Your changes reach them on their own. If they change or delete a copy, a bar appears in your "
+        "vault: press Review and choose whose version to keep. Logins they add come into your vault, in "
+        "a folder named after their vault.",
+        "Each shared vault also shows in your folder list as “Shared with …”, listing what it holds.",
+    ]),
     ("EDITING ON SEVERAL DEVICES", [
         "Before every save, Vaultline reads the file again and merges in changes made on your phone, checks "
         "the result, and keeps a local backup (Settings > Database > Open backups folder).",

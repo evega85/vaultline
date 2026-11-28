@@ -317,7 +317,7 @@ def test_card_template_and_double_click_edit(setup, monkeypatch):
 
     view = win.vault_view
     visa = next(v for v in view._views if v.title == "Visa")
-    row = view._rows[view._views.index(visa)]
+    row = view.row_widget(view._views.index(visa))
     assert "Visa •••• 1234" in row.sub._full and "4111" not in row.sub._full  # number masked in the list
     # search by card number, with or without spaces
     for q in ("1234", "4111111111111234", "4111 1111"):
@@ -1230,3 +1230,38 @@ def test_recycle_bin_in_the_folder_list(setup, monkeypatch):
     assert view.in_bin and view._views == []  # still showing the (now empty) bin
     view._folder_picked(None)
     assert not view.in_bin and any(v.title == "Netflix" for v in view._views)
+
+
+def test_big_list_makes_rows_only_near_the_screen(setup):
+    """Each row is several widgets: a vault of hundreds of entries must not make them all (memory)."""
+    app, win, vc, _clip, db = setup
+    kp = PyKeePass(str(db), password=PW)
+    for i in range(400):
+        kp.add_entry(kp.root_group, f"Bulk {i:03}", f"user{i}", "x")
+    kp.save()
+    unlock(app, win, vc)
+    view = win.vault_view
+    assert wait_for(app, lambda: len(view._views) == 405 and view._rows)
+    made = len(view._rows)
+    assert 0 < made <= view.ROW_KEEP, made
+    on_screen = [i for i in range(view.list.count()) if view.list.visualItemRect(view.list.item(i))
+                 .intersects(view.list.viewport().rect())]
+    assert on_screen and all(i in view._rows for i in on_screen)  # every row you can see is drawn
+    # scrolling to the end: the last rows get theirs, and the total stays bounded
+    for _ in range(3):
+        view.list.verticalScrollBar().setValue(view.list.verticalScrollBar().maximum())
+        app.processEvents()
+    last = view.list.count() - 1
+    assert last in view._rows and view._rows[last].view.uuid == view._views[last].uuid
+    assert len(view._rows) <= view.ROW_KEEP + view.ROW_SPARE * 2 + 40
+    # searching shows a row far down the list with its widget, and keyboard moves keep up
+    view.search.setText("Bulk 250")
+    app.processEvents()
+    cur = view.list.currentRow()
+    assert view._views[cur].title == "Bulk 250" and cur in view._rows
+    view.search.setText("Bulk")
+    app.processEvents()
+    for _ in range(30):
+        QTest.keyClick(view.search, Qt.Key_Down)
+    app.processEvents()
+    assert view.list.currentRow() in view._rows

@@ -358,6 +358,8 @@ class DetailPanel(QFrame):
         site = []
         if view.url:
             site.append(_Field("Website", view.url, self, url=True))
+        for n, extra in enumerate(view.extra_urls, 2):
+            site.append(_Field(f"Website {n}", extra, self, url=True))
         if card and view.card_phone:
             site.append(_Field("Toll-free" if is_toll_free(view.card_phone) else "Phone", view.card_phone, self))
         if card and view.card_local_phone:

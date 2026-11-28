@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit
 from .. import icons, identity as idlib, passgen
 from ..vault import EntryEdit, EntryView, GroupView
 from .entry_dialog import _Section, _small_tool
+from .folder_picker import FolderPicker
 from .widgets import mark_shared_folders
 
 PASSWORD_LENGTH = 20
@@ -17,14 +18,14 @@ PASSWORD_LENGTH = 20
 class NewLoginDialog(QDialog):
     def __init__(self, parent: QWidget | None, window_title: str, site: str, profiles: list[EntryView],
                  profile_uuid: str = "", groups: list[GroupView] | None = None, root_uuid: str = "",
-                 folder_uuid: str = "", length: int = PASSWORD_LENGTH, shared: set[str] | None = None,
-                 url: str = ""):
+                 folder_uuid: str = "", generate=None, shared: set[str] | None = None,
+                 url: str = "", generator_config=None):
         super().__init__(parent)
         self.setWindowTitle("New login")
         self.setModal(True)
         self.setMinimumWidth(440)
         self.result_edit: EntryEdit | None = None
-        self._length = max(12, min(64, length or PASSWORD_LENGTH))
+        self._new_password = generate or passgen.generate  # Settings > Password generator
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 18)
         lay.setSpacing(12)
@@ -72,23 +73,25 @@ class NewLoginDialog(QDialog):
         pw_row = QHBoxLayout(pw_w)
         pw_row.setContentsMargins(0, 0, 0, 0)
         pw_row.setSpacing(6)
-        self.password = QLineEdit(passgen.generate(self._length))
+        self.password = QLineEdit(self._new_password())
         self.password.setObjectName("Mono")
         self.password.setEchoMode(QLineEdit.Password)
         eye = _small_tool(icons.EYE, "Show / hide")
         eye.setCheckable(True)
         eye.toggled.connect(lambda on: self.password.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
         again = _small_tool(icons.DICE, "Generate another")
-        again.clicked.connect(lambda: self.password.setText(passgen.generate(self._length)))
+        again.clicked.connect(lambda: self.password.setText(self._new_password()))
         pw_row.addWidget(self.password, 1)
         pw_row.addWidget(eye)
         pw_row.addWidget(again)
+        self.gen_options = None
+        if generator_config is not None:  # the generator's options, beside it
+            from .gen_options import gear_button
+            self.gen_options = gear_button(generator_config, lambda: self.password.setText(self._new_password()))
+            pw_row.addWidget(self.gen_options)
         lay.addWidget(_Section("Password", pw_w))
 
-        self.folder = QComboBox()
-        self.folder.addItem("Top level", root_uuid)
-        for g in groups or []:
-            self.folder.addItem(("      " * g.depth) + g.name, g.uuid)
+        self.folder = FolderPicker(groups or [], root_uuid)
         i = self.folder.findData(folder_uuid) if folder_uuid else -1
         self.folder.setCurrentIndex(i if i >= 0 else 0)
         mark_shared_folders(self.folder, shared or set())

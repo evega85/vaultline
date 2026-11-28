@@ -380,7 +380,7 @@ def test_fill_types_into_previous_window(setup, fake_os, monkeypatch):
     # and so does the icon on the row in the list, for that row's entry
     fake_os.typed.clear()
     i = next(i for i, v in enumerate(view.views) if v.title == "Google")
-    row = view._rows[i]
+    row = view.row_widget(i)
     assert "into “‹b›Team Chat‹/b› & more”" in row.fill_btn.toolTip()
     row.fill_btn.click()
     assert wait_for(app, lambda: fake_os.typed and not flow.busy)

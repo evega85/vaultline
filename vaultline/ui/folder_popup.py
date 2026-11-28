@@ -16,14 +16,15 @@ MAX_LIST_H = 320
 
 class _Row(QWidget):
     def __init__(self, popup: "FolderPopup", text: str, count: int, depth: int, uuid: str | None,
-                 active: bool, shared: bool = False):
+                 active: bool, shared: bool = False, vault_top: bool = False, can_share: bool = False):
         super().__init__()
         self.setAttribute(Qt.WA_TranslucentBackground)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10 + depth * 16, 0, 6, 0)
         lay.setSpacing(6)
         ico = QLabel()
-        glyph = icons.DELETE if uuid == BIN else icons.FOLDER_CLOSED if uuid else icons.SEARCH
+        glyph = icons.DELETE if uuid == BIN else icons.LOCK if vault_top or (uuid or "").startswith("share:") \
+            else icons.FOLDER_CLOSED if uuid else icons.SEARCH
         tint = theme.WARN if shared else None  # shared with agents: amber, so it stands out
         ico.setPixmap(icons.glyph(glyph, tint or (theme.ACCENT_SOFT if active else theme.TEXT_3), 14).pixmap(14, 14))
         lay.addWidget(ico)
@@ -37,8 +38,10 @@ class _Row(QWidget):
         self.count.setObjectName("Hint")
         lay.addWidget(self.count)
         self.tools: list[QToolButton] = []
-        if uuid and uuid != BIN:
-            for glyph, tip, sig in ((icons.EDIT, "Rename", popup.rename_requested),
+        if uuid and uuid != BIN and not vault_top and not uuid.startswith("share:"):
+            share = ((icons.OPEN, "Share with…", popup.share_requested),) if can_share else ()
+            for glyph, tip, sig in (*share, (icons.EDIT, "Rename", popup.rename_requested),
+                                    (icons.FOLDER, "Move to another folder or vault", popup.move_requested),
                                     (icons.DELETE, "Delete (to recycle bin)", popup.delete_requested)):
                 b = QToolButton()
                 b.setIcon(icons.glyph(glyph, theme.TEXT_2, 13))
@@ -67,11 +70,14 @@ class _Row(QWidget):
 class FolderPopup(QFrame):
     selected = Signal(object)          # folder uuid or None for all
     rename_requested = Signal(str)
+    move_requested = Signal(str)
+    share_requested = Signal(str)
     delete_requested = Signal(str)
     create_requested = Signal()
 
     def __init__(self, parent: QWidget, groups: list[GroupView], counts: dict[str, int], total: int,
-                 current: str | None, shared: set[str] | None = None, bin_count: int = -1):
+                 current: str | None, shared: set[str] | None = None, bin_count: int = -1,
+                 share_rows: list[tuple[str, str, int]] | None = None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -102,12 +108,17 @@ class FolderPopup(QFrame):
             item.setData(Qt.UserRole, uuid)
             self.list.addItem(item)
             self.list.setItemWidget(item, _Row(self, text, count, depth, uuid, uuid == current,
-                                               bool(uuid and uuid in (shared or ()))))
+                                               bool(uuid and uuid in (shared or ())), uuid in tops,
+                                               bool(share_rows) and uuid not in vault_ids))
 
+        tops = {g.uuid for g in groups if g.vault and g.depth == 0}  # shared vaults' own rows
+        vault_ids = {g.uuid for g in groups if g.vault}  # folders inside an attached vault: no sharing
         add("All entries", total, 0, None)
-        # the recycle bin, then the folder shared with agents (a reminder), then the rest
+        # the recycle bin, "Shared with ..." views, the folder shared with agents (a reminder), the rest
         if bin_count >= 0:
             add("Recycle bin", bin_count, 0, BIN)
+        for sid, label, n in share_rows or []:
+            add(label, n, 0, sid)
         shared = shared or set()
         top = [g for g in groups if g.uuid in shared]
         rest = [g for g in groups if g.uuid not in shared]

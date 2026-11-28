@@ -4,9 +4,10 @@ from __future__ import annotations
 import zlib
 
 import pyotp
-from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication, QComboBox, QLabel,
+                               QPushButton, QScrollBar, QSizePolicy, QWidget)
 
 from .. import otp as otplib
 from .. import theme
@@ -205,3 +206,21 @@ def mark_shared_folders(combo, shared: set[str]) -> None:
         combo.setToolTip(SHARED_TIP if on else "")
     combo.currentIndexChanged.connect(look)
     look()
+
+
+class WheelGuard(QObject):
+    """Installed on the application: the mouse wheel over a drop-down, number box or slider scrolls
+    whatever it sits in instead of changing its value (too easy to change a setting by accident).
+    Open drop-down lists still scroll as usual: their list isn't one of these."""
+
+    def eventFilter(self, obj, ev):  # noqa: N802
+        if ev.type() == QEvent.Wheel and isinstance(obj, (QComboBox, QAbstractSpinBox, QAbstractSlider)) \
+                and not isinstance(obj, QScrollBar):
+            p = obj.parentWidget()
+            while p is not None and not isinstance(p, QAbstractScrollArea):
+                p = p.parentWidget()
+            if p is not None:
+                bar = p.horizontalScrollBar() if ev.angleDelta().y() == 0 else p.verticalScrollBar()
+                QApplication.sendEvent(bar, ev)
+            return True
+        return False

@@ -202,6 +202,9 @@ def main() -> int:
     app.setFont(font)
     app.setStyleSheet(theme.STYLESHEET)
     app.setWindowIcon(icons.app_icon())
+    from .ui.widgets import WheelGuard
+    app._wheel_guard = WheelGuard(app)  # the wheel never changes a setting by accident
+    app.installEventFilter(app._wheel_guard)
 
     holder: dict = {}
     server = _single_instance(lambda: holder["win"])

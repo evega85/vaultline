@@ -17,7 +17,8 @@ class EntryRow(QWidget):
     copy_requested = Signal(str)   # "username" | "password" | "otp"
     fill_requested = Signal()      # type this entry into the window you came from
 
-    def __init__(self, view: EntryView, pixmap: QPixmap | None = None, parent: QWidget | None = None):
+    def __init__(self, view: EntryView, pixmap: QPixmap | None = None, parent: QWidget | None = None,
+                 shared: list[str] | None = None):
         super().__init__(parent)
         self.view = view
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -43,6 +44,8 @@ class EntryRow(QWidget):
             parts = [view.username] if view.username else []
         if view.group:
             parts.append(view.group)
+        if shared:
+            parts.append("shared with " + ", ".join(shared))
         self.sub = ElidedLabel("  ·  ".join(parts) or "no username")
         self.sub.setObjectName("Sub" if parts else "Muted")
         text.addStretch()

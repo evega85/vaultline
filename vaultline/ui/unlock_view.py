@@ -23,7 +23,7 @@ def recent_choices(recent: list, current: str = "") -> list[dict]:
 
 class UnlockView(QWidget):
     unlock_requested = Signal(str, str, str)  # path, password, keyfile
-    create_requested = Signal(str, str)        # path, master password
+    create_requested = Signal(str, str, object, str)  # path, master password, imported items, export to delete
 
     def __init__(self, db_path: str = "", keyfile: str = "", parent: QWidget | None = None):
         super().__init__(parent)
@@ -222,9 +222,11 @@ class UnlockView(QWidget):
     def _create_finished(self, dlg: NewDatabaseDialog, result: int) -> None:
         # finished comes before accepted, so read the fields here, then wipe them
         if result == NewDatabaseDialog.Accepted:
-            self.create_requested.emit(dlg.chosen_path(), dlg.password.text())
+            self.create_requested.emit(dlg.chosen_path(), dlg.password.text(), list(dlg.items), dlg.delete_after)
         dlg.password.clear()
         dlg.confirm.clear()
+        dlg.export_password.clear()
+        dlg.items.clear()
         dlg.deleteLater()
 
     def browse(self) -> None:

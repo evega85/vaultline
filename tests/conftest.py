@@ -41,3 +41,19 @@ def pytest_unconfigure(config):
         k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
         k32.TerminateProcess(k32.GetCurrentProcess(), _exit_status)
     os._exit(_exit_status)
+
+
+def dispose(*objs) -> None:
+    """End Qt objects a test made (controllers, windows) now, on this thread. Left to Python's garbage
+    collector, one could be destroyed later on a vault worker thread, which Qt doesn't allow (crash)."""
+    import gc
+
+    import shiboken6
+    from PySide6.QtWidgets import QApplication
+    for o in objs:
+        if o is not None and shiboken6.isValid(o):
+            if hasattr(o, "shutdown"):
+                o.shutdown()
+            shiboken6.delete(o)
+    QApplication.processEvents()
+    gc.collect()

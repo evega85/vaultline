@@ -129,6 +129,20 @@ OTP_FIELDS = ("otp", *otplib.LEGACY_FIELDS)
 _INTERNAL_PREFIXES = ("KeePassXC-Browser", "KPH: ", "KPXC_", "KPEX_")
 
 
+# More websites for one login, as KeePassXC (browser integration) and KeePass2Android keep them:
+# KP2A_URL, KP2A_URL_1, KP2A_URL_2... Shown and edited as extra Website rows, not as custom fields.
+_URL_FIELD = re.compile(r"^KP2A_URL(?:_(\d+))?$")
+
+
+def is_url_field(key: str) -> bool:
+    return bool(_URL_FIELD.match(key))
+
+
+def _url_order(key: str) -> int:
+    m = _URL_FIELD.match(key)
+    return int(m.group(1)) if m and m.group(1) else 0
+
+
 def is_internal_field(key: str) -> bool:
     return key in STANDARD_FIELDS or key in OTP_FIELDS or key.startswith(_INTERNAL_PREFIXES)
 
@@ -212,6 +226,10 @@ class EntryView:
     password_alias: str = ""  # custom field standing in for an empty Password (Bitwarden import)
     references: tuple[str, ...] = ()  # "username"/"password" when stored as a {REF:...} to another entry
     autotype: AutoTypeInfo = field(default_factory=AutoTypeInfo)  # read from the kdbx, never written
+    vault: str = ""  # "" = the main database; otherwise the key of an attached one (multivault)
+    extra_urls: tuple[str, ...] = ()  # more websites (KP2A_URL fields), in order
+    data: dict = field(default_factory=dict)  # Vaultline's own CustomData items ("Vaultline.*"), hidden
+    shares: tuple[str, ...] = ()  # vault ids this entry is shared with (set by the controller, see sharing.py)
 
     def get_field(self, key: str) -> str:
         return next((f.value for f in self.custom if f.key == key), "")
@@ -327,6 +345,8 @@ class GroupView:
     path: tuple[str, ...]
     depth: int
     parent_uuid: str = ""  # the root's uuid for top-level folders
+    vault: str = ""        # "" = the main database; otherwise the key of an attached one (multivault)
+    data: tuple = ()       # Vaultline's own CustomData items as (key, value) pairs, hidden
 
     @property
     def display(self) -> str:
@@ -340,6 +360,7 @@ class Snapshot:
     icons: dict[str, bytes]          # icon uuid -> image bytes (usually PNG)
     root_uuid: str
     binned: list = field(default_factory=list)  # EntryViews in the recycle bin (for restoring), not listed
+    vaults: list = field(default_factory=list)  # multivault.VaultInfo for attached databases (merged snapshots)
 
 
 # ---- changes ------------------------------------------------------------------
@@ -356,6 +377,7 @@ class EntryEdit:
     new_group: str = ""            # "Work/Clients": create (if needed) and move there
     custom: list[CustomField] | None = None  # None leaves custom fields untouched
     card: bool = False             # saved from the card form (card fields arrive in `custom`)
+    extra_urls: list[str] | None = None  # more websites; None leaves them untouched
 
 
 @dataclass
@@ -384,6 +406,29 @@ class MoveEntries:
     uuids: list[str]
     group_uuid: str | None = None  # existing folder (root uuid = top level)
     new_group: str = ""            # or a folder path to create, e.g. "Work/Clients"
+
+
+@dataclass
+class CopyEntries:
+    """Copies of entries (new ids, history and attachments kept) in a folder, in this or another
+    database; the originals stay. Done by multivault's CrossMove even inside one database."""
+    uuids: list[str]
+    group_uuid: str | None = None
+    new_group: str = ""
+
+
+@dataclass
+class CopyFolder:
+    """A copy of a folder with everything in it, under `parent_uuid` (None = top of its own database)."""
+    uuid: str
+    parent_uuid: str | None = None
+
+
+@dataclass
+class ImportEntries:
+    """Add entries from another password manager (bitwarden.ImportItem), folders created by path.
+    Fields are written as given, including other apps' own (passkeys), with their protection."""
+    items: list
 
 
 @dataclass
@@ -426,6 +471,32 @@ class ChangeMasterPassword:
     new_password: str
 
 
+@dataclass
+class MergeDuplicate:
+    """Two entries for the same login, in one database: `keep` gets every field it has empty that
+    `drop` has filled (one-time code, URL, notes, custom and passkey fields) and the tags of both;
+    `drop` goes to the recycle bin. Refused when the passwords differ or a field holds different
+    values on each side. Reported by field name only."""
+    keep: str
+    drop: str
+
+
+@dataclass(frozen=True)
+class TransferItem:
+    """An entry or folder taken out of one database (Vault.export) to add to another."""
+    xml: bytes                 # the <Entry> or <Group> element, with history
+    icons: dict                # custom icon uuid hex -> image bytes it uses
+    binaries: dict             # attachment ref -> bytes it uses
+
+
+@dataclass
+class Transfer:
+    """Add exported entries/folders, with new ids (Vault.last_transfer maps old entry ids to new)."""
+    items: list
+    group_uuid: str | None = None  # destination folder (None = top level)
+    new_group: str = ""            # or a folder path to create
+
+
 # ---- helpers --------------------------------------------------------------------
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -444,6 +515,55 @@ def _string_items(entry) -> list[tuple[str, str, bool]]:
 
 def _string_fields(entry) -> dict[str, str]:
     return {k: v for k, v, _ in _string_items(entry)}
+
+
+OWN_DATA = "Vaultline."  # prefix of Vaultline's CustomData keys (sharing links, settings)
+
+
+def _custom_data(el):
+    return el.find("CustomData")
+
+
+def own_data(el) -> dict[str, str]:
+    """Vaultline's CustomData items on an entry, folder or Meta element."""
+    holder = _custom_data(el)
+    out = {}
+    if holder is not None:
+        for item in holder.findall("Item"):
+            k = item.findtext("Key") or ""
+            if k.startswith(OWN_DATA):
+                out[k] = item.findtext("Value") or ""
+    return out
+
+
+def set_data(el, key: str, value: str | None) -> None:
+    """Set (or with None remove) a CustomData item, placed where KeePass writes it: in an entry before
+    History, in a folder before its entries and subfolders, at the end of Meta."""
+    holder = _custom_data(el)
+    if holder is None:
+        if value is None:
+            return
+        holder = etree.Element("CustomData")
+        anchor = el.find("History") if el.tag == "Entry" else \
+            next((c for c in el if c.tag in ("Entry", "Group")), None) if el.tag == "Group" else None
+        if anchor is not None:
+            anchor.addprevious(holder)
+        else:
+            el.append(holder)
+    for item in holder.findall("Item"):
+        if item.findtext("Key") == key:
+            if value is None:
+                holder.remove(item)
+            else:
+                item.find("Value").text = value
+            break
+    else:
+        if value is not None:
+            item = etree.SubElement(holder, "Item")
+            etree.SubElement(item, "Key").text = key
+            etree.SubElement(item, "Value").text = value
+    if not len(holder):
+        el.remove(holder)
 
 
 def _remove_field(entry, key: str) -> None:
@@ -478,6 +598,7 @@ class Vault:
         self._sha: str | None = None
         self.last_touched: list[str] = []  # entry uuids changed by the last save()
         self.last_report: list[dict] = []  # value-free notes from the last save() (card fixes)
+        self.last_transfer: dict[str, str] = {}  # old entry uuid -> new, from the last Transfer
 
     # ---- reading -------------------------------------------------------
     def _read_disk(self) -> bytes:
@@ -564,7 +685,8 @@ class Vault:
             if not in_bin:
                 parent = g.parentgroup
                 groups.append(GroupView(g.uuid.hex, g.name or "", path, len(path) - 1,
-                                        parent.uuid.hex if parent is not None else ""))
+                                        parent.uuid.hex if parent is not None else "",
+                                        data=tuple(sorted(own_data(g._element).items()))))
         groups.sort(key=lambda gv: tuple(p.casefold() for p in gv.path))
 
         views, binned = [], []
@@ -578,7 +700,9 @@ class Vault:
     def _entry_view(self, e, path: tuple[str, ...]) -> EntryView:
         items = _string_items(e)
         fields = {k: v for k, v, _ in items}
-        custom = tuple(CustomField(k, v, p) for k, v, p in items if not is_internal_field(k))
+        custom = tuple(CustomField(k, v, p) for k, v, p in items if not is_internal_field(k) and not is_url_field(k))
+        extra_urls = tuple(v for k, v in sorted(((k, v) for k, v, _ in items if is_url_field(k) and v.strip()),
+                                                key=lambda kv: _url_order(kv[0])))
         try:
             attachments = tuple(a.filename for a in e.attachments if a.filename)
         except Exception:
@@ -592,6 +716,8 @@ class Vault:
         refs = tuple(name for name, key in (("username", "UserName"), ("password", "Password"))
                      if "{REF:" in fields.get(key, "").upper())
         return EntryView(
+            data=own_data(e._element),
+            extra_urls=extra_urls,
             references=refs,
             password_alias=alias,
             uuid=e.uuid.hex,
@@ -664,6 +790,7 @@ class Vault:
         for _ in range(4):
             self.last_touched = []
             self.last_report = []
+            self.last_transfer = {}
             disk = self._read_disk()
             disk_sha = _sha(disk)
             if disk_sha != self._sha:
@@ -727,6 +854,22 @@ class Vault:
                 e.tags = tags
             e.touch(modify=True)
             self.last_touched.append(e.uuid.hex)
+        elif isinstance(change, ImportEntries):
+            for it in change.items:
+                dest = self._ensure_group_path(it.folder) if it.folder.strip(" /") else kp.root_group
+                e = kp.add_entry(dest, it.title, it.username, it.password, url=it.url or None,
+                                 notes=it.notes or None, force_creation=True)
+                if it.otp:
+                    e._set_string_field("otp", it.otp, True)
+                for key, value, protected in it.fields:
+                    e._set_string_field(key, value, protected)
+                if it.tags:
+                    e.tags = list(dict.fromkeys(it.tags))
+                if it.created:
+                    e.ctime = it.created
+                if it.modified:
+                    e.mtime = it.modified
+                self.last_touched.append(e.uuid.hex)
         elif isinstance(change, MoveEntries):
             dest = self._ensure_group_path(change.new_group) if change.new_group.strip() \
                 else self._group(change.group_uuid)
@@ -763,6 +906,12 @@ class Vault:
         elif isinstance(change, NormalizeCards):
             for u in change.uuids:
                 self._normalize_card(self._entry(u))
+        elif isinstance(change, Transfer):
+            self._apply_transfer(change)
+        elif isinstance(change, MergeDuplicate):
+            self._merge_duplicate(change)
+        elif hasattr(change, "apply_to"):  # sharing.py's changes
+            change.apply_to(self)
         else:
             raise TypeError(f"Unknown change {change!r}")
 
@@ -890,17 +1039,195 @@ class Vault:
                     _remove_field(entry, key)
 
         if edit.custom is not None:
-            wanted = {f.key: f for f in edit.custom if f.key and not is_internal_field(f.key)}
+            wanted = {f.key: f for f in edit.custom if f.key and not is_internal_field(f.key) and not is_url_field(f.key)}
             for key, _v, _p in _string_items(entry):
-                if not is_internal_field(key) and key not in wanted:
+                if not is_internal_field(key) and not is_url_field(key) and key not in wanted:
                     _remove_field(entry, key)
             current = {k: (v, p) for k, v, p in _string_items(entry)}
             for f in wanted.values():
                 if current.get(f.key) != (f.value, f.protected):
                     _remove_field(entry, f.key)
                     entry._set_string_field(f.key, f.value, f.protected)
+        if edit.extra_urls is not None:
+            urls = [u.strip() for u in edit.extra_urls if u.strip()]
+            current = sorted(((k, v) for k, v, _ in _string_items(entry) if is_url_field(k)),
+                             key=lambda kv: _url_order(kv[0]))
+            if [v for _k, v in current if v.strip()] != urls:  # rewritten only when changed
+                for key, _v in current:
+                    _remove_field(entry, key)
+                for n, u in enumerate(urls):  # KeePassXC's own names: KP2A_URL, then KP2A_URL_1...
+                    entry._set_string_field("KP2A_URL" if n == 0 else f"KP2A_URL_{n}", u, False)
         entry.touch(modify=True)
         self.last_touched.append(entry.uuid.hex)
+
+    # ---- moving between databases ------------------------------------------------
+    def export(self, entry_uuids=(), folder_uuid: str | None = None) -> list[TransferItem]:
+        """Copies of entries (or one folder with everything in it) to add to another database.
+        Refused when something uses a {REF:...} to another entry, or another entry refers to one of
+        these: references only work inside one database."""
+        if folder_uuid:
+            g = self._group(folder_uuid)
+            if g.is_root_group:
+                raise VaultError("Can't move the whole database")
+            elements = [g._element]
+        else:
+            elements = [self._entry(u)._element for u in entry_uuids]
+        current = ".//Entry[not(ancestor::History)]"
+        moving: set[str] = set()
+        for el in elements:
+            nodes = [el] if el.tag == "Entry" else el.xpath(current)
+            for n in nodes:
+                moving.add(_b64_uuid_to_hex(n.findtext("UUID")).upper())
+                for v in n.xpath("./String/Value/text()"):
+                    if "{REF:" in v.upper():
+                        title = n.xpath("string(./String[Key='Title']/Value)") or "An entry"
+                        raise VaultError(f"“{title}” uses a reference to another entry, "
+                                         "so it can't move to another database.")
+        recycle = self._kp.recyclebin_group
+        bin_el = recycle._element if recycle is not None else None
+        for n in self._kp.tree.getroot().xpath("//Entry[not(ancestor::History)]"):
+            if _b64_uuid_to_hex(n.findtext("UUID")).upper() in moving:
+                continue
+            if bin_el is not None and any(a is bin_el for a in n.iterancestors()):
+                continue  # in the recycle bin
+            for v in n.xpath("./String/Value/text()"):
+                up = v.upper()
+                if "{REF:" in up and any(m in up for m in moving):
+                    raise VaultError("Another entry refers to one being moved (a {REF:...}); "
+                                     "it can't move to another database.")
+        icons, binaries = self._custom_icons(), self._kp.binaries
+        out = []
+        for el in elements:
+            used_icons = {}
+            for t in el.iter("CustomIconUUID"):
+                h = _b64_uuid_to_hex(t.text)
+                if h in icons:
+                    used_icons[h] = icons[h]
+            used_bins = {}
+            for v in el.xpath(".//Binary/Value[@Ref]"):
+                ref = int(v.get("Ref"))
+                if 0 <= ref < len(binaries):
+                    used_bins[ref] = binaries[ref]
+            out.append(TransferItem(etree.tostring(el), used_icons, used_bins))
+        return out
+
+    def _apply_transfer(self, change: Transfer) -> None:
+        kp = self._kp
+        dest = self._ensure_group_path(change.new_group) if change.new_group.strip() else self._group(change.group_uuid)
+        for it in change.items:
+            el = etree.fromstring(it.xml)
+            ids: dict[str, str] = {}
+            for node in el.iter("Entry", "Group"):  # history copies share their entry's id, so map by old id
+                u = node.find("UUID")
+                if u.text not in ids:
+                    ids[u.text] = base64.b64encode(uuidlib.uuid4().bytes).decode()
+                if node.tag == "Entry" and not any(a.tag == "History" for a in node.iterancestors()):
+                    self.last_transfer[_b64_uuid_to_hex(u.text)] = _b64_uuid_to_hex(ids[u.text])
+                u.text = ids[u.text]
+            for node in list(el.iter("PreviousParentGroup")):
+                node.getparent().remove(node)
+            for holder in list(el.iter("CustomData")):  # sharing links belong to the database they're in
+                for item in list(holder.findall("Item")):
+                    if (item.findtext("Key") or "").startswith(OWN_DATA):
+                        holder.remove(item)
+                if not len(holder):
+                    holder.getparent().remove(holder)
+            for t in list(el.iter("CustomIconUUID")):
+                data = it.icons.get(_b64_uuid_to_hex(t.text))
+                if data:
+                    t.text = _hex_to_b64_uuid(self._ensure_icon(data))
+                else:
+                    t.getparent().remove(t)
+            refs: dict[int, int] = {}
+            for v in el.xpath(".//Binary/Value[@Ref]"):
+                old = int(v.get("Ref"))
+                if old not in refs:
+                    refs[old] = kp.add_binary(it.binaries.get(old, b""))
+                v.set("Ref", str(refs[old]))
+            if el.tag == "Entry":  # entries go before subfolders, as KeePass writes them
+                first_group = dest._element.find("Group")
+                if first_group is not None:
+                    first_group.addprevious(el)
+                else:
+                    dest._element.append(el)
+            else:
+                dest._element.append(el)
+        self.last_touched.extend(self.last_transfer.values())
+
+    def _merge_duplicate(self, change: MergeDuplicate) -> None:
+        if change.keep == change.drop:
+            raise VaultError("Pick two different entries to merge")
+        keep, drop = self._entry(change.keep), self._entry(change.drop)
+        kf = {k: (v, p) for k, v, p in _string_items(keep)}
+        df = {k: (v, p) for k, v, p in _string_items(drop)}
+        title = kf.get("Title", ("", False))[0] or "untitled"
+        if kf.get("Password", ("",))[0] != df.get("Password", ("",))[0]:
+            raise VaultError(f"“{title}”: the passwords differ, so it wasn't merged. Decide which one is right first.")
+        if any(k in kf for k in OTP_FIELDS) and any(k in df for k in OTP_FIELDS):
+            ko = otplib.from_fields({k: v for k, (v, _p) in kf.items()})
+            do = otplib.from_fields({k: v for k, (v, _p) in df.items()})
+            if (ko.secret if ko else None) != (do.secret if do else None):
+                raise VaultError(f"“{title}”: the one-time codes differ, so it wasn't merged.")
+        has_otp = any(kf.get(k, ("",))[0] for k in OTP_FIELDS)
+        conflicts, filled = [], []
+        for key, (value, protected) in df.items():
+            if key in ("Title", "UserName", "Password", "URL") or is_url_field(key) or not value:
+                continue
+            if key in OTP_FIELDS:
+                if has_otp:
+                    continue
+            elif kf.get(key, ("",))[0]:
+                if kf[key][0] != value:
+                    conflicts.append(key)
+                continue
+            filled.append(key)
+        if conflicts:
+            raise VaultError(f"“{title}”: {', '.join(sorted(conflicts))} differ, so it wasn't merged.")
+        keep_urls = [v for k, (v, _p) in sorted(kf.items(), key=lambda kv: _url_order(kv[0])) if is_url_field(k) and v]
+        seen_urls = {u.casefold().rstrip("/") for u in (kf.get("URL", ("",))[0], *keep_urls) if u}
+        new_urls = []
+        for u in [df.get("URL", ("",))[0]] + [v for k, (v, _p) in sorted(df.items(), key=lambda kv: _url_order(kv[0]))
+                                             if is_url_field(k) and v]:
+            if u and u.casefold().rstrip("/") not in seen_urls:
+                seen_urls.add(u.casefold().rstrip("/"))
+                new_urls.append(u)
+        if new_urls and not kf.get("URL", ("",))[0]:  # keep had no website: the first fills it
+            filled.append("URL")
+            df = {**df, "URL": (new_urls.pop(0), False)}
+        if filled or new_urls or set(drop.tags or []) - set(keep.tags or []):
+            keep.save_history()
+            for key in filled:
+                _remove_field(keep, key)
+                keep._set_string_field(key, df[key][0], df[key][1])
+            if new_urls:  # the whole list again, so new names never collide with imported ones
+                for key in [k for k in kf if is_url_field(k)]:
+                    _remove_field(keep, key)
+                for n, u in enumerate(keep_urls + new_urls):
+                    keep._set_string_field("KP2A_URL" if n == 0 else f"KP2A_URL_{n}", u, False)
+                filled.append("more_urls")
+            keep.tags = list(dict.fromkeys([*(keep.tags or []), *(drop.tags or [])]))
+            keep.touch(modify=True)
+        self._kp.trash_entry(drop)
+        self.last_touched.append(keep.uuid.hex)
+        self.last_report.append({"merged": change.keep, "title": title, "removed": change.drop,
+                                 "filled": sorted("otp" if k in OTP_FIELDS else k for k in filled)})
+
+    def digest(self, entry_uuid: str) -> str:
+        """A fingerprint of an entry's fields (with protection), attachments and history length, to
+        check a moved copy against the original. Never holds a value."""
+        e = self._entry(entry_uuid)
+        el = e._element
+        binaries = self._kp.binaries
+        h = hashlib.sha256()
+        for k, v, p in sorted(_string_items(e)):
+            h.update(repr((k, v, p)).encode())
+        for b in el.findall("Binary"):
+            ref = b.find("Value").get("Ref")
+            data = binaries[int(ref)] if ref is not None and int(ref) < len(binaries) else b""
+            h.update(repr((b.findtext("Key"), _sha(data))).encode())
+        h.update(str(len(el.findall("History/Entry"))).encode())
+        h.update(repr(sorted(e.tags or [])).encode())
+        return h.hexdigest()
 
     def _ensure_icon(self, png: bytes) -> str:
         """Add an icon to Meta/CustomIcons (reusing an identical one). Returns its uuid hex."""

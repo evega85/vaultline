@@ -16,6 +16,7 @@ fi
   --distpath "$OUT" --workpath build/pyinstaller \
   --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtQml \
   --exclude-module PySide6.QtQuick --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtPdf \
+  --collect-data pykeepass \
   run.py
 .venv/bin/pyinstaller --noconfirm --onefile --console --name vaultline-cli \
   --distpath "$OUT" --workpath build/pyinstaller \

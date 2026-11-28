@@ -27,6 +27,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from . import otp as otplib
 from .config import DATA_DIR, Config
+from .multivault import AUTOOPEN_GROUP
 from .vault import EntryView, Snapshot
 
 ACCESS_LOG = DATA_DIR / "agent-access.log"
@@ -56,6 +57,8 @@ def shared_folder_ids(snap: Snapshot, folder_uuid: str) -> set[str]:
     """The shared folder and every folder below it. Empty if it isn't in this database (or is in the bin)."""
     if not folder_uuid or not any(g.uuid == folder_uuid for g in snap.groups):
         return set()
+    seen: set[str] = set()
+    twice = {g.uuid for g in snap.groups if g.uuid in seen or seen.add(g.uuid)}
     children: dict[str, list[str]] = {}
     for g in snap.groups:
         children.setdefault(g.parent_uuid, []).append(g.uuid)
@@ -65,6 +68,8 @@ def shared_folder_ids(snap: Snapshot, folder_uuid: str) -> set[str]:
         if u not in out:
             out.add(u)
             todo.extend(children.get(u, ()))
+    if out & twice:  # the same folder id in two open databases (a copied file): can't tell them apart
+        return set()
     return out
 
 
@@ -280,9 +285,12 @@ class AgentGate(QObject):
         shared = shared_folder_ids(snap, c.agent_folder_uuid)
         if not shared:
             refuse("shared folder missing", "The shared folder isn't in this database.")
-        current = next((v for v in snap.entries if v.uuid == entry.uuid), None)
+        same_id = [v for v in snap.entries if v.uuid == entry.uuid]
+        current = same_id[0] if len(same_id) == 1 else None
         if current is None or current.group_uuid not in shared:
             refuse("outside shared folder", "That entry isn't in the folder shared with agents.")
+        if not current.vault and current.group == AUTOOPEN_GROUP:
+            refuse("autoopen", "That entry holds another database's password; it's never shared with agents.")
         if current.is_card:
             refuse("card", "Cards can't be shared with agents.")
         if current.is_identity:

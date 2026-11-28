@@ -3,15 +3,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QRect, QRegularExpression, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QRegularExpressionValidator
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QCompleter, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QButtonGroup, QCompleter, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QToolButton,
                                QVBoxLayout, QWidget)
 
 from .. import icons, identity as idlib, otp as otplib, passgen, theme
+from .folder_picker import FolderPicker
 from .widgets import mark_shared_folders
 from ..vault import (CARD_BRAND_KEY, CARD_CODE_KEY, CARD_LOCAL_PHONE_KEY, CARD_PHONE_KEY, CARD_HOLDER_KEY, CARD_MONTH_KEY, CARD_NUMBER_KEY,
                       CARD_SLOT_KEYS, CARD_YEAR_KEY, LEGACY_CODE_KEY, LEGACY_EXPIRY_KEY, CustomField,
-                      EntryEdit, EntryView, GroupView, expiry_from_parts, is_internal_field, parse_expiry)
+                      EntryEdit, EntryView, GroupView, expiry_from_parts, is_internal_field, is_url_field, parse_expiry)
 
 NEW_FOLDER = "__new__"
 
@@ -234,8 +235,10 @@ class EntryDialog(QDialog):
                  draft: EntryEdit | None = None, error: str = "",
                  groups: list[GroupView] | None = None, root_uuid: str = "",
                  default_group: str | None = None, usernames: list[str] | None = None,
-                 hide_username=None, copy_secret=None, shared: set[str] | None = None):
+                 hide_username=None, copy_secret=None, shared: set[str] | None = None, generate=None,
+                 generator_config=None):
         super().__init__(parent)
+        self._new_password = generate or passgen.generate  # Settings > Password generator
         self._uuid = draft.uuid if draft else (view.uuid if view else None)
         editing = self._uuid is not None
         self._groups = groups or []
@@ -292,11 +295,7 @@ class EntryDialog(QDialog):
         fl = QVBoxLayout(folder_w)
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setSpacing(6)
-        self.folder = QComboBox()
-        self.folder.addItem("Top level", root_uuid)
-        for g in self._groups:
-            self.folder.addItem(("      " * g.depth) + g.name, g.uuid)
-        self.folder.addItem("＋ New folder…", NEW_FOLDER)
+        self.folder = FolderPicker(self._groups, root_uuid, extras=[("＋ New folder…", NEW_FOLDER)])
         mark_shared_folders(self.folder, shared or set())
         self.new_folder = QLineEdit()
         self.new_folder.setPlaceholderText("Folder name (use / for a subfolder, e.g. Work/Clients)")
@@ -346,6 +345,11 @@ class EntryDialog(QDialog):
         pw_row.addWidget(self.password, 1)
         pw_row.addWidget(self._eye)
         pw_row.addWidget(gen)
+        self.gen_options = None
+        if generator_config is not None:  # the generator's options, beside it
+            from .gen_options import gear_button
+            self.gen_options = gear_button(generator_config, self._generate)
+            pw_row.addWidget(self.gen_options)
         self.pw_copied = QLabel()
         self.pw_copied.setObjectName("Hint")
         self.pw_copied.setWordWrap(True)
@@ -356,7 +360,19 @@ class EntryDialog(QDialog):
 
         self.url = QLineEdit()
         self.url.setPlaceholderText("https://")
-        self.sec_url = _Section("URL", self.url)
+        url_w = QWidget()
+        self._url_lay = QVBoxLayout(url_w)
+        self._url_lay.setContentsMargins(0, 0, 0, 0)
+        self._url_lay.setSpacing(6)
+        url_row = QHBoxLayout()
+        url_row.setSpacing(6)
+        url_row.addWidget(self.url, 1)
+        self.add_url_btn = _small_tool(icons.ADD, "Add another website for this login")
+        self.add_url_btn.clicked.connect(lambda: self.add_url_row("", focus=True))
+        url_row.addWidget(self.add_url_btn)
+        self._url_lay.addLayout(url_row)
+        self._url_rows: list[tuple[QWidget, QLineEdit]] = []
+        self.sec_url = _Section("URL", url_w)
         root.addWidget(self.sec_url)
 
         self.card_phone = QLineEdit()
@@ -542,6 +558,8 @@ class EntryDialog(QDialog):
             self.username.setText(src.username)
             self.password.setText(src.password)
             self.url.setText(src.url)
+            for u in src.extra_urls or ():
+                self.add_url_row(u)
             self.notes.setPlainText(src.notes)
             self.otp.setText(src.otp if src.otp is not None else (view.otp_text if view else ""))
             is_card = src.card
@@ -592,6 +610,31 @@ class EntryDialog(QDialog):
         self.resize(560, min(820, int(screen.height() * 0.85)) if screen else 760)
         self.title.setFocus()
 
+    def add_url_row(self, text: str = "", focus: bool = False) -> QLineEdit:
+        """Another website for this login (stored as KeePassXC's KP2A_URL fields)."""
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        edit = QLineEdit(text)
+        edit.setPlaceholderText("https:// (another address for the same login)")
+        remove = _small_tool(icons.CLOSE, "Remove this website")
+        lay.addWidget(edit, 1)
+        lay.addWidget(remove)
+        pair = (row, edit)
+        self._url_rows.append(pair)
+
+        def drop():
+            self._url_rows.remove(pair)
+            self._url_lay.removeWidget(row)
+            row.deleteLater()
+            self.url.setFocus()
+        remove.clicked.connect(drop)
+        self._url_lay.addWidget(row)
+        if focus:
+            edit.setFocus()
+        return edit
+
     @staticmethod
     def _edit_from_view(view: EntryView) -> EntryEdit:
         """The entry as the dialog would save it unchanged (so 'nothing changed' is exact)."""
@@ -613,7 +656,8 @@ class EntryDialog(QDialog):
             ident = identity_fields({k: view.get_field(k) for k in idlib.KEYS})
         custom = [f for f in view.custom if f.key not in hidden] + card + ident
         return EntryEdit(view.uuid, view.title, username, view.password, view.url, view.notes,
-                         view.otp_text, view.group_uuid, "", custom, card=view.is_card)
+                         view.otp_text, view.group_uuid, "", custom, card=view.is_card,
+                         extra_urls=list(view.extra_urls))
 
     @staticmethod
     def _split_imported(values: dict[str, str]) -> dict:
@@ -696,7 +740,7 @@ class EntryDialog(QDialog):
         self._eye.setIcon(icons.glyph(icons.EYE_OFF if show else icons.EYE, theme.TEXT_2, 15))
 
     def _generate(self) -> None:
-        self.password.setText(passgen.generate(20))
+        self.password.setText(self._new_password())
         self._eye.setChecked(True)
         if self._copy_secret is not None:  # ready to paste into the site's "new password" box
             seconds = self._copy_secret(self.password.text())
@@ -747,7 +791,7 @@ class EntryDialog(QDialog):
                 continue
             if not f.key:
                 return self._fail("Every custom field needs a name.", row.key)
-            if is_internal_field(f.key) or (self._card and f.key in CARD_SLOT_KEYS) or \
+            if is_internal_field(f.key) or is_url_field(f.key) or (self._card and f.key in CARD_SLOT_KEYS) or \
                     (self._identity and f.key in idlib.KEYS):
                 return self._fail(f"“{f.key}” is a reserved field name. Pick another.", row.key)
             if f.key in seen:
@@ -796,7 +840,8 @@ class EntryDialog(QDialog):
 
         edit = EntryEdit(self._uuid, title, self.username.text().strip(), self.password.text(),
                          self.url.text().strip(), self.notes.toPlainText(), otp_uri,
-                         group_uuid, new_group, custom, card=self._card)
+                         group_uuid, new_group, custom, card=self._card,
+                         extra_urls=[e.text().strip() for _w, e in self._url_rows if e.text().strip()])
         if self._original:
             orig = EntryEdit(**{**self._original.__dict__, "otp": None})
             if edit == orig:

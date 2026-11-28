@@ -243,7 +243,73 @@ def test_settings_and_shortcut_clash(setup):
     assert win._shortcut_clash(hotkey.NEWLOGIN_ID, "Ctrl+Alt+J") == ""
     win.open_settings()
     page = win.settings_page
-    page.newlogin_length.setValue(32)
+    page.pw_length.setValue(32)
     page.close_action.setCurrentIndex(0)
     win.close_settings()
-    assert c.newlogin_length == 32 and c.default_profile_uuid == "" and c.newlogin_folder_uuid == ""
+    assert c.pw_length == 32 and c.default_profile_uuid == "" and c.newlogin_folder_uuid == ""
+
+
+def test_generator_settings_and_wheel(setup):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtWidgets import QApplication
+    from vaultline import passgen
+    from vaultline.ui.widgets import WheelGuard
+    app, win, vc, *_ = setup
+    unlock(app, win, vc)
+    guard = WheelGuard()
+    QApplication.instance().installEventFilter(guard)
+    try:
+        win.open_settings()
+        page = win.settings_page
+        # the wheel over a number box or drop-down doesn't change it
+        before, close_before = page.pw_length.value(), page.close_action.currentIndex()
+        for w in (page.pw_length, page.close_action):
+            ev = QWheelEvent(QPointF(5, 5), QPointF(w.mapToGlobal(QPoint(5, 5))), QPoint(0, 0), QPoint(0, -120),
+                             Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+            QApplication.sendEvent(w, ev)
+        assert page.pw_length.value() == before and page.close_action.currentIndex() == close_before
+        # at least one kind of character stays ticked
+        for cb in page.pw_sets:
+            cb.setChecked(False)
+        assert sum(cb.isChecked() for cb in page.pw_sets) == 1
+        for cb in page.pw_sets:
+            cb.setChecked(cb.property("attr") in ("pw_lower", "pw_digits"))
+        page.pw_length.setValue(14)
+        win.close_settings()
+        c = win.config
+        assert c.pw_length == 14 and not c.pw_upper and not c.pw_symbols and c.pw_lower and c.pw_digits
+        pw = passgen.from_config(c)
+        assert len(pw) == 14 and all(ch in passgen.LOWER + passgen.DIGITS for ch in pw)
+    finally:
+        QApplication.instance().removeEventFilter(guard)
+
+
+def test_gear_beside_generate(setup, monkeypatch):
+    from vaultline import passgen
+    app, win, vc, *_ = setup
+    unlock(app, win, vc)
+    c = win.config
+    c.pw_length, c.pw_upper, c.pw_lower, c.pw_digits, c.pw_symbols = 20, True, True, True, True
+    saved = []
+    monkeypatch.setattr(type(c), "save", lambda self: saved.append(1))
+    win.open_editor(None)
+    dlg = win._dialog
+    assert dlg is not None and dlg.gen_options is not None
+    dlg.gen_options.click()
+    pop = dlg.gen_options._popup
+    assert pop.isVisible()
+    pop.length.setValue(12)
+    for cb in pop.sets:
+        cb.setChecked(cb.property("attr") == "pw_digits")
+    pop.close()
+    app.processEvents()
+    assert saved and c.pw_length == 12 and c.pw_digits and not (c.pw_upper or c.pw_lower or c.pw_symbols)
+    pw = dlg.password.text()  # a new one, made with the new options
+    assert len(pw) == 12 and all(ch in passgen.DIGITS for ch in pw)
+    # closing without a change leaves the password alone
+    dlg.gen_options.click()
+    dlg.gen_options._popup.close()
+    app.processEvents()
+    assert dlg.password.text() == pw and len(saved) == 1
+    dlg.done(0)

@@ -24,7 +24,7 @@ import re
 from . import identity as idlib, pipe_name
 from .agent_access import AccessRefused, AgentGate, client_process, log_access, shared_folder_path, shared_ids_for
 from .controller import VaultController
-from .vault import (CreateFolder, DeleteEntries, DeleteFolder, EntryView, MoveEntries, MoveFolder, NormalizeCards,
+from .vault import (CopyEntries, CreateFolder, DeleteEntries, DeleteFolder, EntryView, MergeDuplicate, MoveEntries, MoveFolder, NormalizeCards,
                     RenameFolder, Snapshot, UpdateEntry, card_fixes, CustomField, EntryEdit)
 
 PIPE_NAME = pipe_name("cli")
@@ -51,6 +51,8 @@ def entry_meta(v: EntryView) -> dict:
         "title": v.title,
         "username": username,
         "url": v.url,
+        "more_urls": list(v.extra_urls),
+        "shared_with": list(v.shares),
         "folder": v.group.replace(" / ", "/"),
         "folder_id": v.group_uuid,
         "tags": list(v.tags),
@@ -86,7 +88,7 @@ def compare_entries(a: EntryView, b: EntryView) -> dict:
         return v.totp.secret if v.totp is not None else ""
     ca, cb = {f.key: f.value for f in a.custom}, {f.key: f.value for f in b.custom}
     same = {"title": a.title == b.title, "username": a.username == b.username, "password": a.password == b.password,
-            "url": a.url == b.url, "notes": a.notes == b.notes, "otp": otp(a) == otp(b),
+            "url": a.url == b.url, "more_urls": a.extra_urls == b.extra_urls, "notes": a.notes == b.notes, "otp": otp(a) == otp(b),
             "custom_fields": ca == cb, "attachments": a.attachments == b.attachments}
     return {"a": a.uuid, "b": b.uuid, "same": same, "identical": all(same.values()),
             "only_in_a": sorted(set(ca) - set(cb)), "only_in_b": sorted(set(cb) - set(ca)),
@@ -381,6 +383,36 @@ class CliServer(QObject):
             self._guard_shared(snap, [v.group_uuid for v in views], fid, target)
             ch = MoveEntries(ids, group_uuid=fid) if fid else MoveEntries(ids, new_group=target)
             return [ch], f"moved {len(ids)} to {target}"
+        if kind == "share":  # which managed vaults entries are shared with (adds to what they have)
+            import json
+            from .sharing import KEY_NOT, KEY_SHARE, SetData
+            managed = {v.name.casefold(): v.vault_id for v in self.vc.managed_vaults() if v.vault_id}
+            wanted = [str(n) for n in (op.get("with") or [])]
+            unknown = [n for n in wanted if n.casefold() not in managed]
+            if unknown or not wanted:
+                raise CliError(f"Not a vault managed from here: {', '.join(unknown) or '(none given)'}. "
+                               f"Managed: {', '.join(v.name for v in self.vc.managed_vaults()) or 'none'}")
+            ids = {managed[n.casefold()] for n in wanted}
+            changes = []
+            for i in self._list(op, "ids"):
+                v = self._entry(snap, i)
+                if v.vault:
+                    raise CliError(f"{v.title} is in an attached vault, not in this database")
+                own = set(json.loads(v.data.get(KEY_SHARE) or "[]")) | ids
+                nots = set(json.loads(v.data.get(KEY_NOT) or "[]")) - ids
+                changes.append(SetData(v.uuid, KEY_SHARE, json.dumps(sorted(own))))
+                changes.append(SetData(v.uuid, KEY_NOT, json.dumps(sorted(nots)) if nots else None))
+            return changes, f"shared {len(changes) // 2} with {', '.join(wanted)}"
+        if kind == "copy":  # like move, but the originals stay
+            views = [self._entry(snap, i) for i in self._list(op, "ids")]
+            ids = [v.uuid for v in views]
+            target = str(op.get("to", "")).strip()
+            if target in ("", "/"):
+                return [CopyEntries(ids, group_uuid=snap.root_uuid)], f"copied {len(ids)} to top level"
+            fid = self._folder_id(snap, target, must_exist=False)
+            self._guard_shared(snap, [v.group_uuid for v in views], fid, target)
+            ch = CopyEntries(ids, group_uuid=fid) if fid else CopyEntries(ids, new_group=target)
+            return [ch], f"copied {len(ids)} to {target}"
         if kind == "update":
             self._no_refs(op, ("title", "username", "url", "add_tags", "brand", "cardholder", "phone",
                                "local_phone"))
@@ -395,6 +427,10 @@ class CliServer(QObject):
                                   or ch.card_phone is not None or ch.card_local_phone is not None):
                 raise CliError(f"{v.title} isn't a card")
             return [ch], f"updated {v.title}"
+        if kind == "merge":  # duplicates: fills keep's empty fields from drop inside the app; no values here
+            keep, drop = self._entry(snap, op["keep"]), self._entry(snap, op["drop"])
+            self._guard_shared(snap, [drop.group_uuid], keep.group_uuid)
+            return [MergeDuplicate(keep.uuid, drop.uuid)], f"merged {keep.title}"
         if kind == "delete":
             ids = [self._entry(snap, i).uuid for i in self._list(op, "ids")]
             return [DeleteEntries(ids)], f"moved {len(ids)} to the recycle bin"

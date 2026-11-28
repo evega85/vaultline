@@ -449,3 +449,28 @@ def test_cli_compare_says_same_or_different_only(agent):
     r = run("--json", "compare", ids["Netflix"][:8], ids["GitHub"][:8])
     out = json.loads(r["out"])
     assert not out["same"]["password"] and not out["identical"] and "gh-pass" not in r["out"]
+
+
+def test_autoopen_entries_never_go_to_agents(agent):
+    from vaultline.vault import EntryEdit
+    a = agent
+    vc, app = a["vc"], a["app"]
+    vc.save(EntryEdit(None, "Shared", "", "made-up-shared-pw", r"C:\nowhere\Shared.kdbx", "", None,
+                      new_group="AutoOpen"))
+    assert wait_for(app, lambda: any(v.title == "Shared" for v in vc.snapshot.entries))
+    ao = next(g for g in vc.snapshot.groups if g.name == "AutoOpen")
+    entry = next(v for v in vc.snapshot.entries if v.title == "Shared")
+    a["share"](ao.uuid)
+    r = a["run"]("secret", entry.uuid[:8])
+    assert r["code"] == 1 and "never shared with agents" in r["err"] and "made-up" not in r["out"]
+    assert a["ask"].asked == []
+
+
+def test_shared_folder_with_same_id_in_two_databases_is_refused():
+    from vaultline.vault import GroupView, Snapshot
+    g1 = GroupView("a" * 32, "Agents", ("Agents",), 0, "r")
+    g2 = GroupView("a" * 32, "Agents", ("Shared", "Agents"), 1, "t", vault="k")
+    one = Snapshot([], [g1], {}, "r")
+    two = Snapshot([], [g1, g2], {}, "r")
+    assert agent_access.shared_folder_ids(one, "a" * 32) == {"a" * 32}
+    assert agent_access.shared_folder_ids(two, "a" * 32) == set()

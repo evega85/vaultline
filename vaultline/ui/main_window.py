@@ -11,11 +11,11 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStackedWidget,
                                QVBoxLayout, QWidget)
 
-from .. import APP_NAME, agent_access, hotkey, icons, otp as otplib, pin as pinlib, theme
+from .. import APP_NAME, agent_access, hotkey, icons, otp as otplib, passgen, pin as pinlib, theme
 from ..clipboard import SecureClipboard
 from ..config import Config
 from ..controller import VaultController
-from ..vault import (CreateFolder, DeleteEntries, DeleteFolder, EntryEdit, EntryView, MoveEntries, RenameFolder,
+from ..vault import (CopyEntries, CopyFolder, CreateFolder, DeleteEntries, DeleteFolder, EntryEdit, EntryView, MoveEntries, MoveFolder, RenameFolder,
                      Snapshot)
 from . import small_dialogs
 from .autotype_flow import AutoTypeFlow
@@ -165,6 +165,9 @@ class MainWindow(QMainWindow):
         vv.folder_create_requested.connect(self.create_folder)
         vv.folder_rename_requested.connect(self.rename_folder)
         vv.folder_delete_requested.connect(self.delete_folder)
+        vv.folder_move_requested.connect(self.move_folder)
+        vv.move_requested.connect(self.move_entry)
+        vv.copy_requested_to.connect(lambda v: self.move_entry(v, copy=True))
         vv.restore_requested.connect(self.restore_entry)
         vv.pin_toggled.connect(self._pin_toggled_compact)
         vv.content_changed.connect(lambda: self._fit_height())
@@ -207,6 +210,13 @@ class MainWindow(QMainWindow):
         self.vc.busy_changed.connect(self._on_busy)
         self.vc.icon_progress.connect(self._on_icon_progress)
         self.vc.applied.connect(self._on_applied)
+        self.vc.vault_failed.connect(lambda name, msg: self.toast.show_message(
+            f"Couldn't open “{name}”", msg, "warn", 5000))
+        self.vault_view.retry_vaults_requested.connect(self.vc.retry_attached)
+        self.vault_view.share_requested.connect(self.share_entry)
+        self.vault_view.folder_share_requested.connect(self.share_folder)
+        self.vault_view.review_requested.connect(self.review_shared)
+        self.vc.sharing_changed.connect(self._on_sharing)
 
     # ---- layout ----------------------------------------------------------------
     def resizeEvent(self, e) -> None:  # noqa: N802
@@ -689,15 +699,23 @@ class MainWindow(QMainWindow):
     def _unlock(self, path: str, password: str, keyfile: str) -> None:
         self.vc.unlock(path, password, keyfile or None)
 
-    def _create(self, path: str, password: str) -> None:
+    def _create(self, path: str, password: str, items=None, delete_after: str = "") -> None:
         self.unlock_view.show_error("")
         self.unlock_view.set_busy(True)
-        self.vc.create(path, password)
+        self._imported = (len(items or []), bool(delete_after))
+        self.vc.create(path, password, items or None, delete_after)
 
     def _pin_entered(self, pin: str) -> None:
         self.vc.pin_unlock(pin)
 
     def _on_unlocked(self, snap: Snapshot) -> None:
+        n, deleted = getattr(self, "_imported", (0, False))
+        self._imported = (0, False)
+        if n:
+            QTimer.singleShot(400, lambda: self.toast.show_message(
+                f"Imported {n} entr{'y' if n == 1 else 'ies'}",
+                "the export file was deleted" if deleted else "delete the export file: it holds every password",
+                "ok" if deleted else "warn", 6000))
         self.config.last_database = self.vc.path
         if self.unlock_view._path != self.vc.path:  # e.g. a database just created from the welcome screen
             self.unlock_view._path = self.vc.path
@@ -811,7 +829,8 @@ class MainWindow(QMainWindow):
                           default_group=self.vault_view.folder_uuid,
                           usernames=[n for n in known_usernames(snap.entries) if not self.config.username_hidden(n)]
                           if snap else [], hide_username=self._hide_username,
-                          copy_secret=self._copy_generated, shared=self.shared_folders())
+                          copy_secret=self._copy_generated, shared=self.shared_folders(),
+                          generate=lambda: passgen.from_config(self.config), generator_config=self.config)
         dlg.finished.connect(lambda result, d=dlg: self._editor_done(d, result))
         self._show_editor(dlg)
 
@@ -883,6 +902,55 @@ class MainWindow(QMainWindow):
             self.vault_view.panel.close_panel()
             self.vc.apply([MoveEntries([view.uuid], group_uuid=uuid)], token=("ui", "Restored"))
 
+    def _vault_name(self, uuid: str) -> str:
+        """The vault a folder id is in, for messages ("" when only one is open)."""
+        snap = self.vc.snapshot
+        if not snap or not snap.vaults:
+            return ""
+        g = self._group(uuid)
+        if g is None or not g.vault:
+            return "Personal"
+        return next((v.name for v in snap.vaults if v.key == g.vault), "")
+
+    def _move_done_text(self, from_uuid: str, to_uuid: str, copy: bool = False) -> str:
+        a, b = self._vault_name(from_uuid), self._vault_name(to_uuid)
+        verb = "Copied" if copy else "Moved"
+        return f"{verb} to {b}" if a != b and b else verb
+
+    def move_entry(self, view: EntryView, copy: bool = False) -> None:
+        """To another folder or vault (copied, checked, then the original goes to the bin), or a copy."""
+        snap = self.vc.snapshot
+        if not self.vc.is_unlocked or self._dialog is not None or snap is None or self.vault_view.in_bin:
+            return
+        got = small_dialogs.ask_move(self, f"“{view.title or 'untitled'}”", snap.groups, snap.root_uuid,
+                                     self.shared_folders(), current=view.group_uuid, copy=copy)
+        if not got:
+            return
+        uuid, copy = got
+        if copy:
+            self.vc.apply([CopyEntries([view.uuid], group_uuid=uuid)],
+                          token=("ui", self._move_done_text(view.group_uuid, uuid, True)))
+        elif uuid != view.group_uuid:
+            self.vault_view.panel.close_panel()
+            self.vc.apply([MoveEntries([view.uuid], group_uuid=uuid)],
+                          token=("ui", self._move_done_text(view.group_uuid, uuid)))
+
+    def move_folder(self, uuid: str) -> None:
+        g = self._group(uuid)
+        snap = self.vc.snapshot
+        if not g or not snap or not self.vc.is_unlocked:
+            return
+        inside = {x.uuid for x in snap.groups if x.vault == g.vault and x.path[: len(g.path)] == g.path}
+        got = small_dialogs.ask_move(self, f"“{g.name}” and everything in it", snap.groups, snap.root_uuid,
+                                     self.shared_folders(), current=g.parent_uuid, exclude=inside)
+        if not got:
+            return
+        to, copy = got
+        if copy:
+            self.vc.apply([CopyFolder(uuid, to)], token=("ui", self._move_done_text(uuid, to, True)))
+        elif to != g.parent_uuid:
+            self.vc.apply([MoveFolder(uuid, to)], token=("ui", self._move_done_text(uuid, to)))
+
     # ---- folders -------------------------------------------------------------------
     def _group(self, uuid: str):
         snap = self.vc.snapshot
@@ -951,7 +1019,12 @@ class MainWindow(QMainWindow):
         snap = self.vc.snapshot
         page = SettingsPage(self.config, self.vc.path, snap.groups if snap else (),
                             profiles=[v for v in snap.entries if v.is_identity] if snap else (),
-                            shared=self.shared_folders())
+                            shared=self.shared_folders(), vaults=self.vc.vault_infos())
+        page.create_shared.connect(lambda: self._add_shared(existing=False))
+        page.add_shared.connect(lambda: self._add_shared(existing=True))
+        page.detach_shared.connect(self._detach_shared)
+        page.manage_shared.connect(lambda u, on: self.vc.set_managed(
+            u, on, token=("ui", "Now managed from here" if on else "No longer managed from here")))
         page.change_master.connect(self._change_master)
         page.pin_toggled.connect(self._pin_toggled)
         page.change_pin.connect(self._set_pin)
@@ -983,9 +1056,113 @@ class MainWindow(QMainWindow):
         self.stack.removeWidget(page)
         page.deleteLater()
 
+    # ---- shared vaults ------------------------------------------------------------
+    def _add_shared(self, existing: bool) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        start = str(Path(self.vc.path).parent)
+        if existing:
+            path, _ = QFileDialog.getOpenFileName(self, "Shared database", start, "KeePass database (*.kdbx)")
+        else:
+            path, _ = QFileDialog.getSaveFileName(self, "Where to make the shared vault",
+                                                  str(Path(start) / "Shared.kdbx"), "KeePass database (*.kdbx)")
+        if not path:
+            return
+        got = small_dialogs.ask_shared_vault(self, path, existing, Path(path).stem)
+        if not got:
+            return
+        name, password = got
+        err = self.vc.add_vault(path, name, password if existing else None, token=("ui", f"“{name}” added"))
+        if err:
+            self.toast.show_message("Not added", err, "error", 4000)
+            return
+        self.close_settings()
+        self.toast.show_message("Opening…", name, "info")
+
+    def _detach_shared(self, key: str) -> None:
+        info = next((v for v in self.vc.vault_infos() if v.key == key), None)
+        if info is None or not info.entry_uuid:
+            return
+        if small_dialogs.confirm(self, "Stop opening it",
+                                 f"Stop opening “{info.name}” with this database? Its AutoOpen entry goes to the "
+                                 "recycle bin; the shared file and everything in it stay as they are.", "Stop opening"):
+            self.close_settings()
+            self.vc.apply([DeleteEntries([info.entry_uuid])], token=("ui", f"“{info.name}” closed"))
+
+    # ---- sharing (sharing.py) ----------------------------------------------------------
+    def _managed(self) -> list[tuple[str, str]]:
+        return [(v.vault_id, v.name) for v in self.vc.managed_vaults() if v.vault_id]
+
+    def _folder_shares(self, group_uuid: str) -> dict[str, str]:
+        """Vault id -> the folder (this one or above) that shares it."""
+        import json
+        from ..sharing import KEY_SHARE
+        snap = self.vc.snapshot
+        by = {g.uuid: g for g in snap.groups} if snap else {}
+        out: dict[str, str] = {}
+        g = by.get(group_uuid)
+        while g is not None:
+            try:
+                ids = json.loads(dict(g.data).get(KEY_SHARE) or "[]")
+            except ValueError:
+                ids = []
+            for vid in ids:
+                out.setdefault(vid, g.name)
+            g = by.get(g.parent_uuid)
+        return out
+
+    def share_entry(self, view: EntryView) -> None:
+        import json
+        from ..sharing import KEY_SHARE
+        vaults = self._managed()
+        if not vaults or not self.vc.is_unlocked or view.vault:
+            return
+        inherited = self._folder_shares(view.group_uuid)
+        got = small_dialogs.ask_share(self, f"“{view.title or 'untitled'}”", vaults, set(view.shares), inherited)
+        if got is None:
+            return
+        try:
+            own_before = set(json.loads(view.data.get(KEY_SHARE) or "[]"))
+        except ValueError:
+            own_before = set()
+        own = sorted((got - set(inherited)) | (own_before & got))
+        nots = sorted(set(inherited) - got)
+        self.vc.share(view.uuid, own, nots, token=("ui", "Sharing updated"))
+
+    def share_folder(self, uuid: str) -> None:
+        import json
+        from ..sharing import KEY_SHARE
+        g = self._group(uuid)
+        vaults = self._managed()
+        if g is None or not vaults or g.vault:
+            return
+        try:
+            own = set(json.loads(dict(g.data).get(KEY_SHARE) or "[]"))
+        except ValueError:
+            own = set()
+        above = self._folder_shares(g.parent_uuid)
+        got = small_dialogs.ask_share(self, f"folder “{g.name}”", vaults, own | set(above), above, folder=True)
+        if got is not None:
+            self.vc.share(uuid, sorted(got - set(above)), group=True, token=("ui", "Sharing updated"))
+
+    def review_shared(self) -> None:
+        conflicts = self.vc.conflicts
+        if not conflicts:
+            return
+        names = {v.vault_id: v.name for v in self.vc.managed_vaults()}
+        small_dialogs.ReviewShared(self, conflicts, names, self.vc.resolve).exec()
+
+    def _on_sharing(self, conflicts: list, report: list) -> None:
+        self.vault_view.set_conflicts(conflicts)
+        errors = [r["error"] for r in report if "error" in r]
+        if errors:
+            self.toast.show_message("Sharing didn't finish", errors[0], "error", 5000)
+            return
+        n = sum(1 for r in report if "shared" in r or "updated" in r or "took" in r or "added" in r)
+        if n:
+            self.toast.show_message("Shared vaults updated", f"{n} change{'s' if n != 1 else ''}", "info", 2200)
+
     def _change_master(self) -> None:
-        vault = self.vc._vault
-        got = small_dialogs.ask_master_change(self, lambda pw: bool(vault) and vault.check_password(pw))
+        got = small_dialogs.ask_master_change(self, self.vc.check_main_password)
         if got:
             err = self.vc.change_master_password(*got)
             if err:

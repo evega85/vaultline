@@ -1,12 +1,14 @@
-"""Create a new, empty database: where to save it and its master password."""
+"""Create a new database: where to save it and its master password, optionally filled from a
+Bitwarden .json export (plain or password protected; see bitwarden.py)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, Qt
-from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QVBoxLayout)
 
-from .. import icons, theme
+from .. import bitwarden, icons, theme
 
 MIN_LENGTH = 8
 
@@ -66,6 +68,29 @@ class NewDatabaseDialog(QDialog):
         warn.setWordWrap(True)
         lay.addWidget(warn)
 
+        # optional: fill it from a Bitwarden export
+        lay.addSpacing(4)
+        self.import_btn = QPushButton("  Import from a Bitwarden export (.json)…")
+        self.import_btn.setObjectName("Link")
+        self.import_btn.setCursor(Qt.PointingHandCursor)
+        self.import_btn.clicked.connect(self._choose_export)
+        lay.addWidget(self.import_btn, 0, Qt.AlignLeft)
+        self.export_path = ""
+        self.export_label = QLabel()
+        self.export_label.setObjectName("Hint")
+        self.export_label.setWordWrap(True)
+        self.export_label.setTextFormat(Qt.PlainText)
+        self.export_label.hide()
+        lay.addWidget(self.export_label)
+        self.export_password = self._password_field("The password you set when exporting from Bitwarden")
+        self.export_password.hide()
+        lay.addWidget(self.export_password)
+        self.delete_export = QCheckBox("Delete the export file after importing (it holds every password)")
+        self.delete_export.setChecked(True)
+        self.delete_export.hide()
+        lay.addWidget(self.delete_export)
+        self.items: list = []  # filled on Create, after the export is read (and decrypted)
+
         self.error = QLabel()
         self.error.setObjectName("Error")
         self.error.setWordWrap(True)
@@ -108,6 +133,21 @@ class NewDatabaseDialog(QDialog):
         if path:
             self.path.setText(str(Path(path)))
 
+    def _choose_export(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose the Bitwarden export", str(Path.home() / "Downloads"),
+                                              "Bitwarden export (*.json)")
+        if not path:
+            return
+        self.export_path = str(Path(path))
+        encrypted = bitwarden.is_encrypted(self.export_path)
+        self.export_label.setText(f"Import: {Path(path).name}" + ("  (password protected)" if encrypted else ""))
+        self.export_label.show()
+        self.export_password.setVisible(encrypted)
+        self.delete_export.show()
+        self.create_btn.setText("Create and import")
+        if encrypted:
+            self.export_password.setFocus()
+
     def chosen_path(self) -> str:
         text = self.path.text().strip().strip('"')
         if text and not text.lower().endswith(".kdbx"):
@@ -130,7 +170,19 @@ class NewDatabaseDialog(QDialog):
 
     def _accept(self) -> None:
         msg = self.problem()
+        if not msg and self.export_path:
+            try:  # read (and decrypt) now, so a wrong export password is said here
+                self.items = bitwarden.items(bitwarden.load(self.export_path, self.export_password.text()))
+            except bitwarden.BitwardenError as exc:
+                msg = str(exc)
+            if not msg and not self.items:
+                msg = "That export has no entries in it."
         self.error.setText(msg)
         self.error.setVisible(bool(msg))
         if not msg:
             self.accept()
+
+    @property
+    def delete_after(self) -> str:
+        """The export file to delete once the import is saved ("" to keep it)."""
+        return self.export_path if self.export_path and self.delete_export.isChecked() else ""

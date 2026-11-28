@@ -31,9 +31,13 @@
 
 Vaultline remembers which file you opened last. It never remembers your master password.
 
+**Coming from Bitwarden?** On the welcome screen choose **Create a new database**, then **Import from a Bitwarden export (.json)**. Plain and password-protected exports both work; folders, cards, identities, one-time codes and passkeys come along (in the same field layout KeePassXC uses), and the export file is deleted afterwards because it holds every password.
+
 The first time you close the window, Vaultline asks whether to keep running in the system tray (so it opens instantly and the shortcut keeps working) or quit. Change it any time in Settings → Windows, where you can also have Vaultline start when you sign in to Windows (it waits in the tray). The tray icon's **Quit** always exits fully.
 
 ![Card details](docs/screenshot-card.png)
+
+**Sharing passwords with someone?** Keep your vault as the master copy and share chosen logins or folders into a separate vault for each person, through Google Drive. Step by step: [docs/sharing.md](docs/sharing.md).
 
 ---
 

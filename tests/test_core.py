@@ -285,3 +285,23 @@ def test_favicon_helpers(qapp):
     assert best[0] == "/touch.png" and best[-1] == "/x.svg" and "/late.png" not in best
     assert favicons.to_png(b"not an image") is None
     assert QImage.fromData(_png("#00ff00")).width() == 32
+
+
+def test_generator_uses_only_the_chosen_characters():
+    pw = passgen.generate(16, upper=False, lower=True, digits=True, symbols=False)
+    assert len(pw) == 16 and all(c in passgen.LOWER + passgen.DIGITS for c in pw)
+    assert any(c in passgen.DIGITS for c in pw) and any(c in passgen.LOWER for c in pw)  # one of each set
+    assert all(c in passgen.DIGITS for c in passgen.generate(8, False, False, True, False))
+    assert len(passgen.generate(12, False, False, False, False)) == 12  # none chosen: all sets
+
+
+def test_generator_settings_and_the_old_length(tmp_path, monkeypatch):
+    import json
+    from vaultline import config as cfgmod
+    monkeypatch.setattr(cfgmod, "CONFIG_FILE", tmp_path / "config.json")
+    (tmp_path / "config.json").write_text(json.dumps({"newlogin_length": 28}))
+    c = cfgmod.Config.load()
+    assert c.pw_length == 28 and c.pw_upper and c.pw_symbols  # the earlier new-login length carries over
+    c.pw_symbols, c.pw_upper, c.pw_length = False, False, 10
+    pw = passgen.from_config(c)
+    assert len(pw) == 10 and all(ch in passgen.LOWER + passgen.DIGITS for ch in pw)

@@ -57,7 +57,11 @@ class Config:
     newlogin_hotkey: str = "Ctrl+Alt+N"
     default_profile_uuid: str = ""   # sign-up profile whose email new logins use (hex UUID)
     newlogin_folder_uuid: str = ""   # folder new logins go in ("" = top level)
-    newlogin_length: int = 20        # generated password length for new logins
+    pw_length: int = 20              # password generator (entry form and new logins)
+    pw_upper: bool = True            # A-Z
+    pw_lower: bool = True            # a-z
+    pw_digits: bool = True           # 0-9
+    pw_symbols: bool = True          # !#$%...
     recent_databases: list = field(default_factory=list)  # [{"path", "keyfile"}], newest first
     close_action: str = "ask"         # the window's X: "ask", "tray" (keep running) or "quit"
     hidden_usernames: list = field(default_factory=list)  # usernames X'd out of suggestions, salted hashes only
@@ -99,6 +103,8 @@ class Config:
             raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls()
+        if "pw_length" not in raw and "newlogin_length" in raw:  # the setting before 2026-11-27
+            raw["pw_length"] = raw["newlogin_length"]
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in raw.items() if k in known})
 

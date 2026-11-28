@@ -38,6 +38,9 @@ class VaultView(QWidget):
     folder_create_requested = Signal()
     folder_rename_requested = Signal(str)  # folder uuid
     folder_delete_requested = Signal(str)
+    folder_move_requested = Signal(str)    # folder uuid: to another folder or vault
+    move_requested = Signal(object)        # EntryView: to another folder or vault
+    copy_requested_to = Signal(object)     # EntryView: a copy in another folder or vault
     pin_toggled = Signal(bool)             # compact window: keep on top
     content_changed = Signal()             # compact window: the results' height changed
     help_requested = Signal()
@@ -47,11 +50,15 @@ class VaultView(QWidget):
     fill_requested = Signal(object)        # EntryView: type it into the window you came from
     fill_field_requested = Signal(object, str)  # EntryView, field: type just that field
     new_login_requested = Signal()         # quick box: new login for the window you came from
+    retry_vaults_requested = Signal()      # banner: try again to open a shared vault that failed
+    share_requested = Signal(object)       # EntryView: pick the vaults it's shared with
+    folder_share_requested = Signal(str)   # folder uuid
+    review_requested = Signal()            # banner: shared entries changed by others
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._views: list[EntryView] = []
-        self._rows: list[EntryRow] = []
+        self._rows: dict[int, EntryRow] = {}  # list row -> its widget, only for rows near the screen
         self._groups: list[GroupView] = []
         self._pixmaps: dict[str, QPixmap] = {}
         self._folder: GroupView | None = None
@@ -127,6 +134,45 @@ class VaultView(QWidget):
         bar.addWidget(self.menu_btn)
         bar.addStretch(0)
 
+        # an attached (shared) database that didn't open; the personal one works as usual
+        self.vault_banner = QWidget()
+        self.vault_banner.setObjectName("VaultBanner")
+        self.vault_banner.setAttribute(Qt.WA_StyledBackground)
+        self.vault_banner.setStyleSheet(f"#VaultBanner {{ border: 1px solid {theme.WARN}; border-radius: 8px; }}")
+        vb = QHBoxLayout(self.vault_banner)
+        vb.setContentsMargins(10, 6, 6, 6)
+        self.vault_banner_text = QLabel()
+        self.vault_banner_text.setTextFormat(Qt.PlainText)
+        self.vault_banner_text.setWordWrap(True)
+        retry = QPushButton("Try again")
+        retry.setCursor(Qt.PointingHandCursor)
+        retry.setFocusPolicy(Qt.NoFocus)
+        retry.clicked.connect(self.retry_vaults_requested)
+        vb.addWidget(self.vault_banner_text, 1)
+        vb.addWidget(retry)
+        self.vault_banner.hide()
+        root.addWidget(self.vault_banner)
+
+        # shared entries someone else changed: waiting for the user's answer
+        self.share_banner = QWidget()
+        self.share_banner.setObjectName("ShareBanner")
+        self.share_banner.setAttribute(Qt.WA_StyledBackground)
+        self.share_banner.setStyleSheet(f"#ShareBanner {{ border: 1px solid {theme.ACCENT_SOFT}; border-radius: 8px; }}")
+        sb = QHBoxLayout(self.share_banner)
+        sb.setContentsMargins(10, 6, 6, 6)
+        self.share_banner_text = QLabel()
+        self.share_banner_text.setTextFormat(Qt.PlainText)
+        self.share_banner_text.setWordWrap(True)
+        review = QPushButton("Review")
+        review.setCursor(Qt.PointingHandCursor)
+        review.setFocusPolicy(Qt.NoFocus)
+        review.clicked.connect(self.review_requested)
+        sb.addWidget(self.share_banner_text, 1)
+        sb.addWidget(review)
+        self.share_banner.hide()
+        root.addWidget(self.share_banner)
+        self._share_groups: list[GroupView] = []
+
         # list
         self.list = QListWidget()
         self.list.setObjectName("Entries")
@@ -142,6 +188,9 @@ class VaultView(QWidget):
         self.list.currentRowChanged.connect(self._remember_row)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
+        self.list.verticalScrollBar().valueChanged.connect(self._realize_rows)
+        self._viewport = self.list.viewport()
+        self._viewport.installEventFilter(self)
         root.addWidget(self.list, 1)
 
         # quick box opened from another window: make a new login for it (first on a sign-up page)
@@ -192,23 +241,38 @@ class VaultView(QWidget):
         self._update_folder_button()
 
     # ---- data ------------------------------------------------------------
+    def set_conflicts(self, conflicts: list) -> None:
+        n = len(conflicts)
+        if n:
+            names = sorted({c.title for c in conflicts})
+            what = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+            self.share_banner_text.setText(f"{n} shared entr{'y' if n == 1 else 'ies'} changed by someone else: {what}")
+        self.share_banner.setVisible(bool(n))
+
     def set_snapshot(self, snap: Snapshot) -> None:
         """Replace the list, keeping search text, folder, selection and scroll position."""
         keep_uuid = self.current().uuid if self.current() else None
         scroll = self.list.verticalScrollBar().value()
         self._snap = snap
         self._groups = snap.groups
+        self._share_groups = [GroupView(f"share:{v.vault_id}", f"Shared with {v.name}", (f"Shared with {v.name}",), 0,
+                                        "", vault=v.key) for v in getattr(snap, "vaults", []) if v.managed and v.vault_id]
+        self._share_names = {v.vault_id: v.name for v in getattr(snap, "vaults", []) if v.managed and v.vault_id}
+        failed = [v for v in getattr(snap, "vaults", []) if v.error and not v.root_uuid]
+        self.vault_banner_text.setText("\n".join(f"Couldn't open “{v.name}”: {v.error}" for v in failed))
+        self.vault_banner.setVisible(bool(failed))
         restore, self._restore = getattr(self, "_restore", None), None
         if restore:
             text, folder = restore
-            self._folder = next((g for g in snap.groups if g.uuid == folder), None)
+            self._folder = next((g for g in (*snap.groups, *self._share_groups) if g.uuid == folder), None)
             self.search.blockSignals(True)
             self.search.setText(text)
             self.search.blockSignals(False)
-        if self._folder and not any(g.uuid == self._folder.uuid for g in snap.groups):
+        every = (*snap.groups, *self._share_groups)
+        if self._folder and not any(g.uuid == self._folder.uuid for g in every):
             self._folder = None
         elif self._folder:
-            self._folder = next(g for g in snap.groups if g.uuid == self._folder.uuid)
+            self._folder = next(g for g in every if g.uuid == self._folder.uuid)
         self._update_folder_button()
 
         self._pixmaps = {uid: pm for uid, pm in self._pixmaps.items() if uid in snap.icons}
@@ -222,22 +286,17 @@ class VaultView(QWidget):
         self.list.blockSignals(True)
         self.list.clear()
         shown = snap.binned if self.in_bin else snap.entries
-        self._views, self._rows = shown, []
-        for v in shown:
+        self._views, self._rows = shown, {}
+        size = QSize(0, self.row_height)
+        for _v in shown:  # empty items; each row's widgets are made when it comes near the screen
             item = QListWidgetItem()
-            item.setSizeHint(QSize(0, self.row_height))
-            row = EntryRow(v, self.pixmap_for(v))
-            row.set_compact(self.compact)
-            row.copy_requested.connect(lambda kind, it=item: self._row_copy(it, kind))
-            row.fill_requested.connect(lambda it=item: self._row_fill(it))
-            row.set_fill_target(self.fill_target)
+            item.setSizeHint(size)
             self.list.addItem(item)
-            self.list.setItemWidget(item, row)
-            self._rows.append(row)
         self.list.blockSignals(False)
         self._update_suggestions(refilter=False)
         self._apply_filter(keep_uuid=keep_uuid)
         self.list.verticalScrollBar().setValue(scroll)
+        self._realize_rows()
         self.list.setUpdatesEnabled(True)
         self._otp_timer.start()
 
@@ -249,6 +308,55 @@ class VaultView(QWidget):
             else:
                 self.panel.show_entry(fresh, self.pixmap_for(fresh))
 
+    # Rows are widgets (buttons, labels, avatar), roughly 200 KB each: making all of them for a vault of
+    # several hundred entries cost over 100 MB. Only rows on or near the screen have them.
+    ROW_SPARE = 8      # rows made beyond each edge of the screen
+    ROW_KEEP = 120     # more made rows than this: drop the ones far off screen
+
+    def row_widget(self, i: int) -> EntryRow:
+        """The widget of list row i, made now if it isn't yet."""
+        row = self._rows.get(i)
+        if row is None:
+            v, item = self._views[i], self.list.item(i)
+            row = EntryRow(v, self.pixmap_for(v), shared=[self._share_names.get(s, "?") for s in v.shares])
+            row.set_compact(self.compact)
+            row.copy_requested.connect(lambda kind, it=item: self._row_copy(it, kind))
+            row.fill_requested.connect(lambda it=item: self._row_fill(it))
+            row.set_fill_target(self.fill_target)
+            self.list.setItemWidget(item, row)
+            self._rows[i] = row
+        return row
+
+    def _realize_rows(self, *_args) -> None:
+        """Give the rows on screen (and a few either side) their widgets; drop far-away ones."""
+        n = self.list.count()
+        if not n or not self.list.isVisible() and self._rows:
+            return
+        top = self.list.indexAt(QPoint(4, 0)).row()
+        if top < 0:
+            top = 0
+        want = max(1, self.list.viewport().height() // max(1, self.row_height) + 1)
+        near: list[int] = []
+        i, seen = top, 0
+        while i >= 0 and seen < self.ROW_SPARE:  # above the screen
+            i -= 1
+            if i >= 0 and not self.list.isRowHidden(i):
+                near.append(i)
+                seen += 1
+        i, seen = top, 0
+        while i < n and seen < want + self.ROW_SPARE:  # on it and below
+            if not self.list.isRowHidden(i):
+                near.append(i)
+                seen += 1
+            i += 1
+        for i in near:
+            self.row_widget(i)
+        if len(self._rows) > self.ROW_KEEP:
+            keep = set(near)
+            for i in [i for i in self._rows if i not in keep]:
+                self.list.removeItemWidget(self.list.item(i))  # deletes the widget
+                del self._rows[i]
+
     def pixmap_for(self, v: EntryView) -> QPixmap | None:
         return self._pixmaps.get(v.icon_uuid) if v.icon_uuid else None
 
@@ -258,7 +366,7 @@ class VaultView(QWidget):
         self._otp_timer.stop()
         self.panel.close_panel()
         self.list.clear()
-        self._views, self._rows, self._groups, self._pixmaps = [], [], [], {}
+        self._views, self._rows, self._groups, self._pixmaps = [], {}, [], {}
         self._suggested = set()
         self._last_uuid = None
         self._folder = None
@@ -275,7 +383,7 @@ class VaultView(QWidget):
         self._update_suggestions()
         self._update_new_login()
         self.panel.set_fill_target(title)
-        for row in self._rows:
+        for row in self._rows.values():
             row.set_fill_target(title)
 
     @property
@@ -327,10 +435,13 @@ class VaultView(QWidget):
         counts: dict[str, int] = {}
         for v in entries:
             counts[v.group_uuid] = counts.get(v.group_uuid, 0) + 1
+        share_rows = [(g.uuid, g.name, sum(1 for v in entries if g.uuid[6:] in v.shares)) for g in self._share_groups]
         pop = FolderPopup(self, self._groups, counts, len(entries), BIN if self.in_bin else self.folder_uuid,
-                          self.shared_folders(), len(self._snap.binned) if self._snap else -1)
+                          self.shared_folders(), len(self._snap.binned) if self._snap else -1, share_rows)
+        pop.share_requested.connect(self.folder_share_requested)
         pop.selected.connect(self._folder_picked)
         pop.rename_requested.connect(self.folder_rename_requested)
+        pop.move_requested.connect(self.folder_move_requested)
         pop.delete_requested.connect(self.folder_delete_requested)
         pop.create_requested.connect(self.folder_create_requested)
         pop.popup_below(self.folder_btn)
@@ -341,7 +452,7 @@ class VaultView(QWidget):
             return
         if self.in_bin:
             self.show_bin(False)
-        self.set_folder(next((g for g in self._groups if g.uuid == uuid), None))
+        self.set_folder(next((g for g in (*self._groups, *self._share_groups) if g.uuid == uuid), None))
 
     def show_bin(self, on: bool) -> None:
         """List the recycle bin (Restore puts an entry back) or go back to the vault."""
@@ -365,6 +476,8 @@ class VaultView(QWidget):
     def _in_folder(self, v: EntryView) -> bool:
         if self._folder is None:
             return True
+        if self._folder.uuid.startswith("share:"):  # "Shared with <vault>"
+            return self._folder.uuid[6:] in v.shares
         p = self._folder.display
         return v.group == p or v.group.startswith(p + " / ")
 
@@ -397,8 +510,9 @@ class VaultView(QWidget):
         m = 8 if on else 16
         self._root.setContentsMargins(m, 0 if on else 4, m, m if on else 0)
         rh = self.row_height
-        for i, row in enumerate(self._rows):
+        for row in self._rows.values():
             row.set_compact(on)
+        for i in range(self.list.count()):
             self.list.item(i).setSizeHint(QSize(0, rh))
         self._update_folder_button()
         self._apply_filter(keep_uuid=keep)
@@ -528,6 +642,7 @@ class VaultView(QWidget):
                 self.empty.setText("No matches")
             else:
                 self.empty.setText("This folder is empty")
+        self._realize_rows()
         self.update_status()
         self._update_new_login()
         self._content_changed()
@@ -588,6 +703,10 @@ class VaultView(QWidget):
         fill.setEnabled(v.autotype.enabled)
         m.addAction("Details", lambda: self.open_details(v))
         m.addAction("Edit…", lambda: self.edit_requested.emit(v))
+        m.addAction("Move to…", lambda: self.move_requested.emit(v))
+        m.addAction("Copy to…", lambda: self.copy_requested_to.emit(v))
+        if self._share_groups and not v.vault:
+            m.addAction("Share with…", lambda: self.share_requested.emit(v))
         m.addSeparator()
         m.addAction("Delete…", lambda: self.delete_requested.emit(v))
         m.exec(self.list.viewport().mapToGlobal(pos))
@@ -595,7 +714,7 @@ class VaultView(QWidget):
     def _tick_otp(self) -> None:
         if not self.isVisible():
             return
-        for i, row in enumerate(self._rows):
+        for i, row in self._rows.items():
             if row.otp_btn is not None and not self.list.isRowHidden(i):
                 row.otp_btn.update()
 
@@ -653,6 +772,8 @@ class VaultView(QWidget):
 
     # ---- keyboard ----------------------------------------------------------
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() in (QEvent.Resize, QEvent.Show) and obj is getattr(self, "_viewport", None):
+            QTimer.singleShot(0, self._realize_rows)  # more rows may now fit
         if obj is self.search and event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
             if self._handle_key(event, dry_run=event.type() == QEvent.ShortcutOverride):
                 event.accept()

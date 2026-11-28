@@ -38,7 +38,17 @@ batch file: a JSON list of ops, e.g.
    {"op": "folder-create", "path": "Archive/2024"},
    {"op": "folder-rename", "folder": "Misc", "name": "Other"},
    {"op": "folder-move", "folder": "Other", "to": "Archive"},
-   {"op": "folder-delete", "folder": "Junk"}]
+   {"op": "folder-delete", "folder": "Junk"},
+   {"op": "merge", "keep": "3f2a9c", "drop": "81bb02"},
+   {"op": "copy", "ids": ["3f2a9c"], "to": "Shared/Business"},
+   {"op": "share", "ids": ["3f2a9c"], "with": ["Sam"]}]
+  share: keep linked copies in vaults managed from this database (Settings > Shared vaults);
+  unsharing is done in Vaultline (right-click > Share with…).
+  A shared vault opened with this one (Settings > Shared vaults) is a top-level folder:
+  "to": "Shared/Business" moves entries or folders into that file (copied, checked, then
+  the originals go to the recycle bin). merge: two entries for the same login in one vault;
+  keep's empty fields (one-time code, URL, notes, custom fields) are filled from drop, then
+  drop is binned. Refused if the passwords, codes or other fields differ (no values shown).
 """
 from __future__ import annotations
 

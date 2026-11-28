@@ -1,7 +1,7 @@
 """Small styled dialogs: confirm, text prompt, set PIN, change master password."""
 from __future__ import annotations
 
-from PySide6.QtCore import QRegularExpression
+from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
@@ -113,21 +113,128 @@ def ask_text(parent: QWidget, title: str, label: str, value: str = "", placehold
 
 
 def ask_folder(parent: QWidget, title: str, text: str, groups, root_uuid: str,
-               shared: set[str] | None = None, ok_text: str = "OK") -> str | None:
-    """Pick a folder (or the top level). Returns its uuid, or None if cancelled."""
-    from PySide6.QtWidgets import QComboBox
+               shared: set[str] | None = None, ok_text: str = "OK", current: str | None = None,
+               exclude: set[str] | None = None) -> str | None:
+    """Pick a folder (or the top of a vault). Returns its uuid, or None if cancelled."""
+    from .folder_picker import FolderPicker
     from .widgets import mark_shared_folders
     d = _Base(parent, title, text)
-    box = QComboBox()
-    box.addItem("Top level", root_uuid)
-    for g in groups:
-        box.addItem(("      " * g.depth) + g.name, g.uuid)
+    box = FolderPicker(groups, root_uuid, exclude=exclude)
+    if current:
+        i = box.findData(current)
+        box.setCurrentIndex(i if i >= 0 else 0)
     mark_shared_folders(box, shared or set())
     d.body.addWidget(box)
     ok = d.buttons(ok_text)
     ok.clicked.connect(d.accept)
     box.setFocus()
     return box.currentData() if d.exec() == QDialog.Accepted else None
+
+
+def ask_move(parent: QWidget, what: str, groups, root_uuid: str, shared: set[str] | None = None,
+             current: str | None = None, exclude: set[str] | None = None,
+             copy: bool = False) -> tuple[str, bool] | None:
+    """Where to move (or copy) `what`, in this vault or another. Returns (folder uuid, copy)."""
+    from .folder_picker import FolderPicker
+    from .widgets import mark_shared_folders
+    d = _Base(parent, "Copy" if copy else "Move", f"{what} to:")
+    box = FolderPicker(groups, root_uuid, exclude=exclude)
+    if current:
+        i = box.findData(current)
+        box.setCurrentIndex(i if i >= 0 else 0)
+    mark_shared_folders(box, shared or set())
+    d.body.addWidget(box)
+    keep = QCheckBox("Keep the original (copy instead of move)")
+    keep.setChecked(copy)
+    d.body.addWidget(keep)
+    ok = d.buttons("Copy" if copy else "Move")
+    keep.toggled.connect(lambda on: (ok.setText("Copy" if on else "Move"), d.setWindowTitle("Copy" if on else "Move")))
+
+    def accept():
+        if box.currentData() == current and not keep.isChecked():
+            d.fail("That's where it is now.")
+            return
+        d.accept()
+    ok.clicked.connect(accept)
+    box.setFocus()
+    return (box.currentData(), keep.isChecked()) if d.exec() == QDialog.Accepted else None
+
+
+def ask_share(parent: QWidget, what: str, vaults: list[tuple[str, str]], checked: set[str],
+              inherited: dict[str, str] | None = None, folder: bool = False) -> set[str] | None:
+    """Tick the vaults to share with. `vaults`: (id, name); `inherited`: id -> the folder that shares
+    it (still tickable: unticking keeps this one entry out). Returns the ticked ids."""
+    inherited = inherited or {}
+    text = (f"Everything in {what}, and whatever is added to it later, is kept in step in the vaults you tick."
+            if folder else f"A linked copy of {what} is kept in each vault you tick. Your changes go out "
+            "automatically; changes made there wait for you to review.")
+    d = _Base(parent, "Share with", text, width=420)
+    boxes = {}
+    for vid, name in vaults:
+        b = QCheckBox(name + (f"   (through folder {inherited[vid]})" if vid in inherited else ""))
+        b.setChecked(vid in checked)
+        d.body.addWidget(b)
+        boxes[vid] = b
+    note = QLabel("Unticking removes the copy there (to that vault's recycle bin). Someone who saw a "
+                  "password may still know it.")
+    note.setWordWrap(True)
+    note.setObjectName("Hint")
+    d.body.addWidget(note)
+    ok = d.buttons("Save")
+    ok.clicked.connect(d.accept)
+    return {vid for vid, b in boxes.items() if b.isChecked()} if d.exec() == QDialog.Accepted else None
+
+
+class ReviewShared(_Base):
+    """Shared entries someone else changed or removed: the user decides each one."""
+
+    def __init__(self, parent: QWidget, conflicts: list, names: dict[str, str], decide):
+        super().__init__(parent, "Review shared entries",
+                         "These were changed in a shared vault. Nothing is applied until you choose.", width=520)
+        self._decide = decide
+        self._rows = []
+        for c in conflicts:
+            self._add(c, names.get(c.vault, "a shared vault"))
+        close = QPushButton("Close")
+        close.setObjectName("Ghost")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(close)
+        self.lay.addLayout(row)
+
+    def _add(self, c, vault: str) -> None:
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 4, 0, 4)
+        if c.kind == "changed":
+            what = ", ".join(c.fields) or "something"
+            text = f"{c.title}\nchanged in {vault}: {what}"
+            buttons = (("Use theirs", "theirs"), ("Keep mine", "mine"))
+        elif c.kind == "deleted":
+            text = f"{c.title}\nremoved from {vault}"
+            buttons = (("Put it back", "restore"), (f"Stop sharing with {vault}", "unshare"))
+        else:
+            text = f"{c.title}\ncan't be shared with {vault}: {c.message}"
+            buttons = ()
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        lay.addWidget(label, 1)
+        for caption, choice in buttons:
+            b = QPushButton(caption)
+            b.clicked.connect(lambda _=False, ch=choice, row=w, c=c: self._pick(c, ch, row))
+            lay.addWidget(b)
+        self.body.addWidget(w)
+        self._rows.append(w)
+
+    def _pick(self, c, choice: str, row: QWidget) -> None:
+        self._decide(c.main_uuid, c.vault, choice)
+        row.setEnabled(False)
+        self._rows.remove(row)
+        row.hide()
+        if not self._rows:
+            self.accept()
 
 
 def _field(d: _Base, label: str, password: bool = True, digits: bool = False) -> QLineEdit:
@@ -142,6 +249,38 @@ def _field(d: _Base, label: str, password: bool = True, digits: bool = False) ->
     d.body.addWidget(lab)
     d.body.addWidget(e)
     return e
+
+
+def ask_shared_vault(parent: QWidget, path: str, existing: bool, name: str = "Shared") -> tuple[str, str] | None:
+    """Name (and, for an existing file, master password) of a shared vault. Returns (name, password)."""
+    from pathlib import Path
+    text = (f"{Path(path).name} will open together with this database. Ask whoever made it for its password."
+            if existing else
+            f"A new database {Path(path).name} is made with a long random password, kept in an "
+            "AutoOpen entry in this database. To share it, share its folder in Google Drive and "
+            "give the other person that password once.")
+    d = _Base(parent, "Open with this database" if existing else "Create a shared vault", text, width=440)
+    lab = QLabel("Name in the folder list")
+    lab.setObjectName("FieldLabel")
+    d.body.addWidget(lab)
+    title = QLineEdit(name)
+    d.body.addWidget(title)
+    pw = _field(d, "Its master password") if existing else None
+    ok = d.buttons("Open" if existing else "Create")
+
+    def accept():
+        if not title.text().strip() or "/" in title.text():
+            d.fail("Give it a name without /.", title)
+            return
+        if pw is not None and not pw.text():
+            d.fail("Enter its master password.", pw)
+            return
+        d.accept()
+    ok.clicked.connect(accept)
+    (pw or title).setFocus()
+    if d.exec() != QDialog.Accepted:
+        return None
+    return title.text().strip(), (pw.text() if pw is not None else "")
 
 
 def ask_new_pin(parent: QWidget) -> str | None:

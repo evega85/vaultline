@@ -314,4 +314,4 @@ def find_matches(entries: Iterable, title: str) -> list[Match]:
     if found:
         return found
     return [Match(e, info(e).effective_sequence, "url") for e in usable
-            if any(_word_in(n, title) for n in site_names(e.url))]
+            if any(_word_in(n, title) for u in (e.url, *getattr(e, "extra_urls", ())) for n in site_names(u))]
